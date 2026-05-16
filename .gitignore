@@ -1,6 +1,9 @@
 # Build temp
 build/
 
+# Tournament data
+*.xml
+
 # IDE
 .idea/
 *.iml
