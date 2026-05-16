@@ -1,0 +1,24 @@
+# Build output
+*.jar
+build/
+
+# MacMahon JAR (embedded in build)
+lib/
+
+# Tournament data (user-specific)
+*.xml
+
+# Config with secrets
+launcher.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
