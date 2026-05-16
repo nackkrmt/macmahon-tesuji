@@ -1,15 +1,5 @@
-# Build output
-*.jar
+# Build temp
 build/
-
-# MacMahon JAR (embedded in build)
-lib/
-
-# Tournament data (user-specific)
-*.xml
-
-# Config with secrets
-launcher.properties
 
 # IDE
 .idea/
