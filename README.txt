@@ -234,6 +234,8 @@
 
   de.cgerlach.macmahon.model.Participant
     - getName(): String
+    - getScoreAfterRound(int): int           (raw score หลังจบรอบ n)
+    - getScoreDisplayString(int): String      (format score เช่น "1½")
 
   de.cgerlach.macmahon.model.IndividualParticipant extends Participant
     - getGoPlayer(): GoPlayer
@@ -407,8 +409,12 @@
 
   POST /api/divisions/:id/matches
     Body: { "round": "1",
-            "matches": [{"table":"1","black":"...","white":"..."}, ...] }
+            "matches": [{"table":"1","black":"...","white":"...",
+                         "blackScore":"1½","whiteScore":"2"}, ...] }
     Upload คู่จัดสำหรับ round
+    *** blackScore/whiteScore = McMahon score ตอนเข้ารอบนั้น ***
+    (getScoreDisplayString(getScoreAfterRound(round-1)) เก็บเป็น String
+     เพราะอาจมีครึ่งแต้ม เช่น "1½" จาก jigo; null = ไม่ทราบ)
 
   POST /api/divisions/:id/standings
     Body: { "standings": { "headers": [...], "rows": [[...], ...] } }
@@ -439,6 +445,8 @@
   Export Pairings:
     1. อ่าน Tournament -> getCurrentRoundNumber()
     2. อ่าน Pairings ผ่าน reflection (skip bye pairings)
+       พร้อมดึง McMahon score ของแต่ละฝ่าย (blackScore/whiteScore)
+       ตอนเข้ารอบนั้น -> ส่งไป TESUJI ด้วย
     3. ตรวจข้อมูลเดิม: getMatches(divId, round)
        ถ้ามีอยู่แล้ว -> เตือน 3 ครั้ง (overwrite warning)
     4. ensureDivision(id, name) - สร้าง division ถ้ายังไม่มี
@@ -527,7 +535,7 @@
   --------------------------------
   เปิดด้วย Notepad:
 
-    tesuji.url=https://tesuji-go-competition.onrender.com
+    tesuji.url=https://tesuji-reg.vercel.app
     tesuji.token=your_secret_token
 
   - tesuji.url  = URL ของ TESUJI server

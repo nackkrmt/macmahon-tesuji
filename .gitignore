@@ -1,6 +1,9 @@
 # Build temp
 build/
 
+# Secrets - contains real TESUJI admin token (use launcher.properties.example)
+launcher.properties
+
 # Tournament data
 *.xml
 

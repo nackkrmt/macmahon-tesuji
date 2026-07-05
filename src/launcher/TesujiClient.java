@@ -221,7 +221,9 @@ public class TesujiClient {
             if (i > 0) json.append(",");
             json.append("{\"table\":\"").append(escJson(m.table)).append("\"");
             json.append(",\"black\":\"").append(escJson(m.black)).append("\"");
-            json.append(",\"white\":\"").append(escJson(m.white)).append("\"}");
+            json.append(",\"white\":\"").append(escJson(m.white)).append("\"");
+            json.append(",\"blackScore\":").append(m.blackScore == null ? "null" : "\"" + escJson(m.blackScore) + "\"");
+            json.append(",\"whiteScore\":").append(m.whiteScore == null ? "null" : "\"" + escJson(m.whiteScore) + "\"").append("}");
         }
         json.append("]}");
         httpPost("/api/divisions/" + divisionId + "/matches", json.toString());
@@ -413,8 +415,15 @@ public class TesujiClient {
         public String table;
         public String black;
         public String white;
-        public ExportMatch(String table, String black, String white) {
+        // McMahon score entering this round, formatted exactly as MacMahon's own
+        // pairing display shows it in "(...)" — getScoreDisplayString(
+        // getScoreAfterRound(currentRound-1)). A String, not int, because it may
+        // carry half/quarter points (e.g. "1½" from a jigo). null = unknown.
+        public String blackScore;
+        public String whiteScore;
+        public ExportMatch(String table, String black, String white, String blackScore, String whiteScore) {
             this.table = table; this.black = black; this.white = white;
+            this.blackScore = blackScore; this.whiteScore = whiteScore;
         }
     }
 }

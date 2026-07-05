@@ -36,7 +36,7 @@ public class MacMahonLauncher {
 
         // Step 1: Read config
         Properties props = loadOrCreateProperties();
-        tesujiUrl = props.getProperty("tesuji.url", "https://tesuji-go-competition.onrender.com").trim();
+        tesujiUrl = props.getProperty("tesuji.url", "https://tesuji-reg.vercel.app").trim();
         tesujiToken = props.getProperty("tesuji.token", "").trim();
         if (tesujiUrl.endsWith("/")) {
             tesujiUrl = tesujiUrl.substring(0, tesujiUrl.length() - 1);
@@ -493,6 +493,25 @@ public class MacMahonLauncher {
     /**
      * Export pairings for current round to TESUJI.
      */
+    /**
+     * The McMahon score a participant enters `currentRound` with, formatted
+     * exactly as MacMahon's own pairing display does inside "(...)":
+     *   participant.getScoreDisplayString(participant.getScoreAfterRound(currentRound - 1))
+     * (verified against Participant.getPairingDisplayString bytecode). Returns a
+     * String so half/quarter points (jigo → "1½") survive; null on any failure.
+     */
+    private static String mmScoreDisplay(Object participant, int currentRound) {
+        if (participant == null) return null;
+        try {
+            int raw = (Integer) participant.getClass()
+                .getMethod("getScoreAfterRound", int.class).invoke(participant, currentRound - 1);
+            return (String) participant.getClass()
+                .getMethod("getScoreDisplayString", int.class).invoke(participant, raw);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     private static void exportPairingsToTesuji(final JFrame parent) {
         if (appInstance == null) {
             showError("ไม่พบ MacMahon Application instance\nกรุณาเปิดทัวร์นาเมนต์ก่อน");
@@ -520,7 +539,9 @@ public class MacMahonLauncher {
                     int board = (Integer) p.getClass().getMethod("getBoardNumber").invoke(p);
                     String bName = blackP != null ? (String) blackP.getClass().getMethod("getName").invoke(blackP) : "?";
                     String wName = whiteP != null ? (String) whiteP.getClass().getMethod("getName").invoke(whiteP) : "?";
-                    matches.add(new TesujiClient.ExportMatch(String.valueOf(board), bName, wName));
+                    String bScore = mmScoreDisplay(blackP, roundNum);
+                    String wScore = mmScoreDisplay(whiteP, roundNum);
+                    matches.add(new TesujiClient.ExportMatch(String.valueOf(board), bName, wName, bScore, wScore));
                 }
             }
 
@@ -926,7 +947,7 @@ public class MacMahonLauncher {
             }
         } else {
             // Create default
-            props.setProperty("tesuji.url", "https://tesuji-go-competition.onrender.com");
+            props.setProperty("tesuji.url", "https://tesuji-reg.vercel.app");
             props.setProperty("tesuji.token", "your_secret_token_here");
             try (FileOutputStream fos = new FileOutputStream(propFile)) {
                 props.store(new OutputStreamWriter(fos, "UTF-8"),
