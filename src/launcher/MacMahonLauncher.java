@@ -6,6 +6,8 @@ import java.awt.*;
 import java.io.*;
 import java.lang.reflect.*;
 import java.net.*;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.Properties;
 
 /**
@@ -21,6 +23,11 @@ public class MacMahonLauncher {
     private static Object appInstance; // MacMahonApplication instance
     private static String chosenFontName = "TH Sarabun New";
 
+    /** The Thai-compatible font family resolved for this system (see setupThaiFont()). */
+    public static String getChosenFontName() {
+        return chosenFontName;
+    }
+
     private static File tournamentFileToOpen = null;
     private static File[] allTournamentFiles = null;
 
@@ -32,6 +39,12 @@ public class MacMahonLauncher {
 
         // Step 0b: Set UTF-8 encoding + Thai-compatible font
         System.setProperty("file.encoding", "UTF-8");
+        // Put the menu bar at the top of the screen like a native Mac app,
+        // instead of inside the window. Must be set before any AWT/Swing
+        // class touches the Toolkit (i.e. before setupThaiFont() below).
+        if (isMac()) {
+            System.setProperty("apple.laf.useScreenMenuBar", "true");
+        }
         setupThaiFont();
 
         // Step 1: Read config
@@ -124,20 +137,48 @@ public class MacMahonLauncher {
     private static int activeTabIndex = -1;
 
     /**
-     * Scan for .xml tournament files in the same directory as the launcher.
+     * Scan for .xml tournament files. Prefers an "xml" subfolder next to the
+     * launcher (keeps the working directory tidy); falls back to the launcher
+     * directory itself when no such subfolder exists (legacy layout).
      */
     private static File[] scanTournamentFiles() {
-        File dir = getLauncherDir();
+        File dir = new File(getLauncherDir(), "xml");
+        if (!dir.isDirectory()) {
+            dir = getLauncherDir();
+        }
+        System.out.println("[Launcher] Scanning for .xml in: " + dir.getAbsolutePath());
         File[] xmlFiles = dir.listFiles(new FileFilter() {
             public boolean accept(File f) {
                 return f.isFile() && f.getName().toLowerCase().endsWith(".xml");
             }
         });
         if (xmlFiles != null && xmlFiles.length > 0) {
-            java.util.Arrays.sort(xmlFiles);
+            java.util.Arrays.sort(xmlFiles, new java.util.Comparator<File>() {
+                public int compare(File a, File b) {
+                    return compareTournamentFileNames(a.getName(), b.getName());
+                }
+            });
             System.out.println("[Launcher] Found " + xmlFiles.length + " .xml files");
         }
         return xmlFiles;
+    }
+
+    /**
+     * Compare tournament file names by their leading division number as an
+     * integer first (so "2 - ..." sorts before "10 - ..."), falling back to
+     * plain case-insensitive string comparison.
+     */
+    private static int compareTournamentFileNames(String a, String b) {
+        java.util.regex.Matcher ma = java.util.regex.Pattern.compile("^(\\d+)").matcher(a);
+        java.util.regex.Matcher mb = java.util.regex.Pattern.compile("^(\\d+)").matcher(b);
+        if (ma.find() && mb.find()) {
+            try {
+                int na = Integer.parseInt(ma.group(1));
+                int nb = Integer.parseInt(mb.group(1));
+                if (na != nb) return Integer.compare(na, nb);
+            } catch (NumberFormatException ignored) { /* fall through */ }
+        }
+        return a.compareToIgnoreCase(b);
     }
 
     /**
@@ -151,7 +192,7 @@ public class MacMahonLauncher {
         tabButtons = new JButton[xmlFiles.length];
         for (int i = 0; i < xmlFiles.length; i++) {
             final int idx = i;
-            String label = xmlFiles[i].getName().replace(".xml", "");
+            String label = xmlFiles[i].getName().replaceFirst("(?i)\\.xml$", "");
             JButton btn = new JButton(label);
             btn.setFocusPainted(false);
             btn.setFont(new Font(chosenFontName, Font.BOLD, 14));
@@ -215,14 +256,26 @@ public class MacMahonLauncher {
         System.out.println("[Launcher] Switching to tab " + index + ": " + file.getName());
 
         try {
-            // Step 1: Auto-save current tournament before switching
+            // Step 1: Auto-save current tournament before switching.
+            // tournamentSave() returns 0 on success; non-zero (or a thrown
+            // exception) means the save did NOT happen (e.g. user cancelled
+            // a Save As dialog) — ask before discarding unsaved changes.
             if (activeTabIndex >= 0) {
+                boolean saveOk = false;
                 try {
                     Method saveMethod = appInstance.getClass().getMethod("tournamentSave");
                     int saveResult = (Integer) saveMethod.invoke(appInstance);
+                    saveOk = (saveResult == 0);
                     System.out.println("[Launcher] Auto-saved tournament (result=" + saveResult + ")");
                 } catch (Exception ex) {
                     System.err.println("[Launcher] Auto-save failed: " + ex.getMessage());
+                }
+                if (!saveOk) {
+                    int confirm = JOptionPane.showConfirmDialog(frame,
+                        "บันทึกทัวร์นาเมนต์ปัจจุบันไม่สำเร็จ\nการเปลี่ยนแปลงที่ยังไม่ได้บันทึกจะหายไปถ้าสลับ tab ต่อ\n\nสลับ tab ต่อหรือไม่?",
+                        "Auto-save ล้มเหลว",
+                        JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+                    if (confirm != JOptionPane.YES_OPTION) return;
                 }
             }
 
@@ -361,20 +414,25 @@ public class MacMahonLauncher {
         Font thaiFont = new Font(chosenFontName, Font.PLAIN, 12);
         Font thaiFontBold = new Font(chosenFontName, Font.BOLD, 12);
         tableFoundCount = 0;
-        applyFontRecursive(container, thaiFont, thaiFontBold);
-        System.out.println("[Launcher] Thai font applied — found " + tableFoundCount + " JTables");
+        int changed = applyFontRecursive(container, thaiFont, thaiFontBold);
+        // Only log when this pass actually changed something — the maintenance
+        // timer calls this every 5s and most passes are no-ops once fonts settle.
+        if (changed > 0) {
+            System.out.println("[Launcher] Thai font applied — " + changed + " components changed, "
+                + tableFoundCount + " JTables found");
+        }
     }
 
     private static int tableFoundCount = 0;
 
-    private static void applyFontRecursive(Container container, Font normal, Font bold) {
+    private static int applyFontRecursive(Container container, Font normal, Font bold) {
+        int changed = 0;
         for (Component comp : container.getComponents()) {
             // Preserve original style (bold/italic) — only change font family
-            preserveFontFamily(comp);
+            if (preserveFontFamily(comp)) changed++;
 
             if (comp instanceof JTable) {
                 JTable table = (JTable) comp;
-                preserveFontFamily(table);
                 wrapTableRenderers(table, normal, bold);
                 tableFoundCount++;
             }
@@ -383,28 +441,34 @@ public class MacMahonLauncher {
                 for (int i = 0; i < mb.getMenuCount(); i++) {
                     JMenu menu = mb.getMenu(i);
                     if (menu != null) {
-                        preserveFontFamily(menu);
+                        if (preserveFontFamily(menu)) changed++;
                         for (int j = 0; j < menu.getItemCount(); j++) {
                             JMenuItem item = menu.getItem(j);
-                            if (item != null) preserveFontFamily(item);
+                            if (item != null && preserveFontFamily(item)) changed++;
                         }
                     }
                 }
             }
             if (comp instanceof Container) {
-                applyFontRecursive((Container) comp, normal, bold);
+                changed += applyFontRecursive((Container) comp, normal, bold);
             }
         }
+        return changed;
     }
 
     /**
      * Change font family to Thai-compatible font while preserving style (bold/italic) and size.
+     * No-op if the component's font family already matches — avoids churning
+     * setFont()/repaint() on every component on every maintenance timer tick.
+     * Returns true iff the font was actually changed.
      */
-    private static void preserveFontFamily(Component comp) {
+    private static boolean preserveFontFamily(Component comp) {
         Font current = comp.getFont();
-        if (current != null) {
+        if (current != null && !chosenFontName.equals(current.getName())) {
             comp.setFont(new Font(chosenFontName, current.getStyle(), current.getSize()));
+            return true;
         }
+        return false;
     }
 
     /**
@@ -467,6 +531,44 @@ public class MacMahonLauncher {
     // ==================== Export to TESUJI ====================
 
     /**
+     * Show a Yes/No confirm dialog on the EDT and block the calling thread
+     * until the user answers. Safe to call from a background thread so that
+     * network calls (which precede these dialogs) never run on the EDT.
+     */
+    private static boolean confirmYesNoOnEdt(final Component parent, final String message,
+            final String title, final boolean warning) {
+        final boolean[] result = new boolean[1];
+        try {
+            SwingUtilities.invokeAndWait(new Runnable() {
+                public void run() {
+                    int opt = JOptionPane.showConfirmDialog(parent, message, title,
+                        JOptionPane.YES_NO_OPTION,
+                        warning ? JOptionPane.WARNING_MESSAGE : JOptionPane.QUESTION_MESSAGE);
+                    result[0] = (opt == JOptionPane.YES_OPTION);
+                }
+            });
+        } catch (Exception e) {
+            return false;
+        }
+        return result[0];
+    }
+
+    /**
+     * Walk the user through the 3-strike overwrite-warning sequence shared by
+     * Export Pairings and Export Wall List. Returns true only if the user
+     * confirmed all three prompts.
+     */
+    private static boolean confirmOverwriteOnEdt(Component parent, String[] warnings) {
+        for (int w = 0; w < warnings.length; w++) {
+            if (!confirmYesNoOnEdt(parent, warnings[w],
+                    "คำเตือน (" + (w + 1) + "/" + warnings.length + ")", true)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * Extract division ID and name from tab file name.
      * "01 - 1-2 Kyu.xml" -> id="1", name="1-2 Kyu"
      */
@@ -474,7 +576,7 @@ public class MacMahonLauncher {
         String divId = "1";
         String divName = "Division 1";
         if (allTournamentFiles != null && activeTabIndex >= 0 && activeTabIndex < allTournamentFiles.length) {
-            String fileName = allTournamentFiles[activeTabIndex].getName().replace(".xml", "");
+            String fileName = allTournamentFiles[activeTabIndex].getName().replaceFirst("(?i)\\.xml$", "");
             java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("^(\\d+)\\s*-\\s*(.+)$").matcher(fileName);
             if (matcher.find()) {
                 divId = matcher.group(1); // keep as-is: "01", "02", etc.
@@ -524,6 +626,10 @@ public class MacMahonLauncher {
 
             Method getCurrentRoundNumber = tournament.getClass().getMethod("getCurrentRoundNumber");
             int roundNum = (Integer) getCurrentRoundNumber.invoke(tournament);
+            if (roundNum <= 0) {
+                showError("ยังไม่มี Round ใน MacMahon\nกรุณา Make Pairing ก่อน");
+                return;
+            }
 
             Method getRound = tournament.getClass().getMethod("getRound", int.class);
             Object round = getRound.invoke(tournament, roundNum);
@@ -548,57 +654,52 @@ public class MacMahonLauncher {
             final String[] divInfo = getDivisionInfo();
             final String roundStr = String.valueOf(roundNum);
 
-            // Check if data for this round already exists on TESUJI
-            boolean dataExists = false;
-            int existingCount = 0;
-            try {
-                TesujiClient checkClient = new TesujiClient(tesujiUrl, tesujiToken);
-                TesujiClient.MatchData existing = checkClient.getMatches(divInfo[0], roundStr);
-                if (existing.matches != null && !existing.matches.isEmpty()) {
-                    dataExists = true;
-                    existingCount = existing.matches.size();
-                }
-            } catch (Exception ex) {
-                // Division may not exist yet — no warning needed
-            }
-
-            if (dataExists) {
-                // Warn 3 times before overwriting existing data
-                String[] warnings = {
-                    "⚠ Round " + roundStr + " ของ " + divInfo[1] + " มีข้อมูลอยู่แล้ว " + existingCount + " คู่\n"
-                        + "ข้อมูลเดิมจะถูกเขียนทับทั้งหมด!\n\n"
-                        + "ต้องการดำเนินการต่อ?",
-                    "⚠ ยืนยันอีกครั้ง\n\n"
-                        + "ข้อมูล Round " + roundStr + " ที่มีอยู่ใน Google Sheet จะถูกลบ\n"
-                        + "และแทนที่ด้วยข้อมูลใหม่ " + matches.size() + " คู่\n\n"
-                        + "ยืนยัน?",
-                    "⚠ ยืนยันครั้งสุดท้าย\n\n"
-                        + "กด Yes เพื่อเขียนทับข้อมูล Round " + roundStr + "\n"
-                        + "Division: " + divInfo[0] + " (" + divInfo[1] + ")\n\n"
-                        + "ดำเนินการ?"
-                };
-                for (int w = 0; w < 3; w++) {
-                    if (JOptionPane.showConfirmDialog(parent, warnings[w],
-                            "คำเตือน (" + (w + 1) + "/3)",
-                            JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE) != JOptionPane.YES_OPTION) {
-                        return;
-                    }
-                }
-            } else {
-                // No existing data — normal single confirmation
-                String msg = "Export Pairings to TESUJI\n\n"
-                    + "Division: " + divInfo[0] + " (" + divInfo[1] + ")\n"
-                    + "Round: " + roundStr + "\n"
-                    + "Pairings: " + matches.size() + " matches\n\n"
-                    + "ดำเนินการ?";
-                if (JOptionPane.showConfirmDialog(parent, msg, "Export Pairings",
-                        JOptionPane.YES_NO_OPTION) != JOptionPane.YES_OPTION) return;
-            }
-
+            // Everything from here on may touch the network — run it off the EDT
+            // so a slow/unreachable TESUJI server never freezes the whole app.
             new Thread(new Runnable() {
                 public void run() {
                     try {
                         TesujiClient client = new TesujiClient(tesujiUrl, tesujiToken);
+
+                        // Check if data for this round already exists on TESUJI
+                        boolean dataExists = false;
+                        int existingCount = 0;
+                        try {
+                            TesujiClient.MatchData existing = client.getMatches(divInfo[0], roundStr);
+                            if (existing.matches != null && !existing.matches.isEmpty()) {
+                                dataExists = true;
+                                existingCount = existing.matches.size();
+                            }
+                        } catch (Exception ex) {
+                            // Division may not exist yet — no warning needed
+                        }
+
+                        boolean proceed;
+                        if (dataExists) {
+                            String[] warnings = {
+                                "⚠ Round " + roundStr + " ของ " + divInfo[1] + " มีข้อมูลอยู่แล้ว " + existingCount + " คู่\n"
+                                    + "ข้อมูลเดิมจะถูกเขียนทับทั้งหมด!\n\n"
+                                    + "ต้องการดำเนินการต่อ?",
+                                "⚠ ยืนยันอีกครั้ง\n\n"
+                                    + "ข้อมูล Round " + roundStr + " ที่มีอยู่ใน TESUJI จะถูกลบ\n"
+                                    + "และแทนที่ด้วยข้อมูลใหม่ " + matches.size() + " คู่\n\n"
+                                    + "ยืนยัน?",
+                                "⚠ ยืนยันครั้งสุดท้าย\n\n"
+                                    + "กด Yes เพื่อเขียนทับข้อมูล Round " + roundStr + "\n"
+                                    + "Division: " + divInfo[0] + " (" + divInfo[1] + ")\n\n"
+                                    + "ดำเนินการ?"
+                            };
+                            proceed = confirmOverwriteOnEdt(parent, warnings);
+                        } else {
+                            String msg = "Export Pairings to TESUJI\n\n"
+                                + "Division: " + divInfo[0] + " (" + divInfo[1] + ")\n"
+                                + "Round: " + roundStr + "\n"
+                                + "Pairings: " + matches.size() + " matches\n\n"
+                                + "ดำเนินการ?";
+                            proceed = confirmYesNoOnEdt(parent, msg, "Export Pairings", false);
+                        }
+                        if (!proceed) return;
+
                         client.ensureDivision(divInfo[0], divInfo[1]);
                         try { client.deleteRound(divInfo[0], roundStr); } catch (Exception ex) { /* OK */ }
                         client.exportPairings(divInfo[0], roundStr, matches);
@@ -660,57 +761,39 @@ public class MacMahonLauncher {
 
             final String[] divInfo = getDivisionInfo();
 
-            // Check if division already exists on TESUJI (standings may exist)
-            boolean standingsExist = false;
-            try {
-                TesujiClient checkClient = new TesujiClient(tesujiUrl, tesujiToken);
-                java.util.List<TesujiClient.Division> divisions = checkClient.getDivisions();
-                for (TesujiClient.Division d : divisions) {
-                    if (d.id.equals(divInfo[0])) {
-                        standingsExist = true;
-                        break;
-                    }
-                }
-            } catch (Exception ex) {
-                // Can't check — proceed normally
-            }
-
-            if (standingsExist) {
-                // Warn 3 times before overwriting existing standings
-                String[] warnings = {
-                    "⚠ Division " + divInfo[0] + " (" + divInfo[1] + ") มี Wall List อยู่แล้วใน Google Sheet\n"
-                        + "ข้อมูลเดิมจะถูกเขียนทับทั้งหมด!\n\n"
-                        + "ต้องการดำเนินการต่อ?",
-                    "⚠ ยืนยันอีกครั้ง\n\n"
-                        + "Wall List เดิมใน Google Sheet จะถูกลบ\n"
-                        + "และแทนที่ด้วยข้อมูลใหม่ " + rows.size() + " rows\n\n"
-                        + "ยืนยัน?",
-                    "⚠ ยืนยันครั้งสุดท้าย\n\n"
-                        + "กด Yes เพื่อเขียนทับ Wall List\n"
-                        + "Division: " + divInfo[0] + " (" + divInfo[1] + ")\n\n"
-                        + "ดำเนินการ?"
-                };
-                for (int w = 0; w < 3; w++) {
-                    if (JOptionPane.showConfirmDialog(parent, warnings[w],
-                            "คำเตือน (" + (w + 1) + "/3)",
-                            JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE) != JOptionPane.YES_OPTION) {
-                        return;
-                    }
-                }
-            } else {
-                // No existing data — normal single confirmation
-                String msg = "Export Wall List to TESUJI\n\n"
-                    + "Division: " + divInfo[0] + " (" + divInfo[1] + ")\n"
-                    + "Wall List: " + rows.size() + " rows, " + headers.size() + " columns\n\n"
-                    + "ดำเนินการ?";
-                if (JOptionPane.showConfirmDialog(parent, msg, "Export Wall List",
-                        JOptionPane.YES_NO_OPTION) != JOptionPane.YES_OPTION) return;
-            }
-
+            // Everything from here on may touch the network — run it off the EDT
+            // so a slow/unreachable TESUJI server never freezes the whole app.
             new Thread(new Runnable() {
                 public void run() {
                     try {
                         TesujiClient client = new TesujiClient(tesujiUrl, tesujiToken);
+
+                        // Check if division already exists on TESUJI (standings may exist)
+                        boolean standingsExist = false;
+                        try {
+                            java.util.List<TesujiClient.Division> divisions = client.getDivisions();
+                            for (TesujiClient.Division d : divisions) {
+                                if (d.id.equals(divInfo[0])) {
+                                    standingsExist = true;
+                                    break;
+                                }
+                            }
+                        } catch (Exception ex) {
+                            // Can't check — proceed normally
+                        }
+
+                        // Wall List is re-exported every round, so a single
+                        // confirmation is enough — just note when it overwrites
+                        // existing standings so the user still knows.
+                        String msg = "Export Wall List to TESUJI\n\n"
+                            + "Division: " + divInfo[0] + " (" + divInfo[1] + ")\n"
+                            + "Wall List: " + rows.size() + " rows, " + headers.size() + " columns\n\n";
+                        if (standingsExist) {
+                            msg += "⚠ มี Wall List เดิมอยู่แล้ว — จะถูกเขียนทับทั้งหมด\n\n";
+                        }
+                        msg += "ดำเนินการ?";
+                        if (!confirmYesNoOnEdt(parent, msg, "Export Wall List", standingsExist)) return;
+
                         client.ensureDivision(divInfo[0], divInfo[1]);
                         client.exportStandings(divInfo[0], headers, rows);
                         System.out.println("[Export] Wall list uploaded: " + rows.size() + " rows");
@@ -743,9 +826,15 @@ public class MacMahonLauncher {
      */
     private static void setupThaiFont() {
         try {
-            // Find best Thai-compatible font available on this system
-            String[] preferredFonts = {"TH Sarabun New", "TH SarabunPSK", "Sarabun", "Tahoma",
-                                        "Leelawadee UI", "Segoe UI", "Cordia New", "Microsoft Sans Serif"};
+            // Find best Thai-compatible font available on this system.
+            // "Thonburi"/"Ayuthaya"/"Krungthep"/"Silom"/"Sathu" are Apple's own
+            // Thai-script fonts, bundled on macOS (verified present via
+            // GraphicsEnvironment on a real Mac) — harmless on Windows since
+            // they simply won't be in the available-fonts set there.
+            String[] preferredFonts = {"TH Sarabun New", "TH SarabunPSK", "Sarabun",
+                                        "Thonburi", "Ayuthaya", "Krungthep", "Silom", "Sathu",
+                                        "Tahoma", "Leelawadee UI", "Segoe UI", "Cordia New",
+                                        "Microsoft Sans Serif"};
             GraphicsEnvironment ge = GraphicsEnvironment.getLocalGraphicsEnvironment();
             java.util.Set<String> available = new java.util.HashSet<String>(
                 java.util.Arrays.asList(ge.getAvailableFontFamilyNames())
@@ -849,16 +938,16 @@ public class MacMahonLauncher {
     private static void setThaiFontOnComponent(Component comp, Font normal, Font bold) {
         // Preserve original style (bold/italic) — only change font family
         Font current = comp.getFont();
-        if (current != null) {
-            comp.setFont(new Font(chosenFontName, current.getStyle(), current.getSize()));
-        } else {
+        if (current == null) {
             comp.setFont(normal);
+        } else if (!chosenFontName.equals(current.getName())) {
+            comp.setFont(new Font(chosenFontName, current.getStyle(), current.getSize()));
         }
         if (comp instanceof JTable) {
             JTable table = (JTable) comp;
             if (table.getTableHeader() != null) {
                 Font hf = table.getTableHeader().getFont();
-                if (hf != null) {
+                if (hf != null && !chosenFontName.equals(hf.getName())) {
                     table.getTableHeader().setFont(new Font(chosenFontName, hf.getStyle(), hf.getSize()));
                 }
             }
@@ -870,11 +959,13 @@ public class MacMahonLauncher {
      */
     private static void wrapTableRenderers(JTable table, Font normal, Font bold) {
         try {
+            boolean headerWrapped = false;
             // Wrap header renderer
             if (table.getTableHeader() != null) {
                 TableCellRenderer headerRenderer = table.getTableHeader().getDefaultRenderer();
                 if (headerRenderer != null && !(headerRenderer instanceof ThaiCellRenderer)) {
                     table.getTableHeader().setDefaultRenderer(new ThaiCellRenderer(headerRenderer, bold));
+                    headerWrapped = true;
                 }
             }
 
@@ -925,8 +1016,12 @@ public class MacMahonLauncher {
                     }
                 }
             }
-            System.out.println("[Launcher] Wrapped " + tableCount + " column renderers on "
-                + table.getClass().getSimpleName() + " (" + table.getColumnCount() + " cols)");
+            // Only log when something was actually (re)wrapped — this runs on every
+            // maintenance timer tick and is normally a no-op after the first pass.
+            if (tableCount > 0 || headerWrapped) {
+                System.out.println("[Launcher] Wrapped " + tableCount + " column renderers on "
+                    + table.getClass().getSimpleName() + " (" + table.getColumnCount() + " cols)");
+            }
         } catch (Exception e) {
             System.err.println("[Launcher] wrapTableRenderers error: " + e.getMessage());
         }
@@ -987,24 +1082,29 @@ public class MacMahonLauncher {
                 File tempDir = new File(System.getProperty("java.io.tmpdir"), "macmahon-launcher");
                 tempDir.mkdirs();
                 File tempJar = new File(tempDir, "macmahon.jar");
+                File tmpFile = new File(tempDir, "macmahon.jar.tmp");
                 try {
-                    FileOutputStream fos = new FileOutputStream(tempJar);
-                    byte[] buf = new byte[8192];
-                    int len;
-                    while ((len = embeddedStream.read(buf)) > 0) {
-                        fos.write(buf, 0, len);
+                    // Write to a scratch file first, then move into place — a
+                    // partial/interrupted write (disk full, killed process)
+                    // can never leave a truncated macmahon.jar behind.
+                    try (InputStream in = embeddedStream;
+                         FileOutputStream fos = new FileOutputStream(tmpFile)) {
+                        byte[] buf = new byte[8192];
+                        int len;
+                        while ((len = in.read(buf)) > 0) {
+                            fos.write(buf, 0, len);
+                        }
                     }
-                    fos.close();
+                    Files.move(tmpFile.toPath(), tempJar.toPath(), StandardCopyOption.REPLACE_EXISTING);
                     System.out.println("[Launcher] Extracted embedded MacMahon to: " + tempJar.getAbsolutePath());
                 } catch (IOException e) {
-                    // File may be locked by another running instance — use existing if valid
+                    tmpFile.delete();
+                    // Destination may be locked by another running instance — use existing if valid
                     if (tempJar.exists() && tempJar.length() > 0) {
                         System.out.println("[Launcher] Using cached embedded JAR: " + tempJar.getAbsolutePath());
                     } else {
                         throw e;
                     }
-                } finally {
-                    embeddedStream.close();
                 }
                 return tempJar;
             }
@@ -1071,12 +1171,18 @@ public class MacMahonLauncher {
         }
 
         private void setFontDeep(Component comp, Font f) {
-            // Preserve bold/italic style from original font
+            // Preserve bold/italic style from original font.
+            // Skip setFont() when the family already matches — this runs on
+            // every cell repaint, so a redundant setFont() here means every
+            // visible cell repaints itself on every paint pass.
+            // Compare via getName() (always the exact string passed to the Font
+            // constructor), not getFamily() (which the OS may resolve to
+            // "Dialog" if the family isn't installed, masking real changes).
             Font current = comp.getFont();
-            if (current != null) {
-                comp.setFont(new Font(f.getFamily(), current.getStyle(), current.getSize()));
-            } else {
+            if (current == null) {
                 comp.setFont(f);
+            } else if (!f.getName().equals(current.getName())) {
+                comp.setFont(new Font(f.getName(), current.getStyle(), current.getSize()));
             }
             if (comp instanceof Container) {
                 for (Component child : ((Container) comp).getComponents()) {
@@ -1103,17 +1209,42 @@ public class MacMahonLauncher {
         String java25 = findJava25Path();
         if (java25 != null) {
             System.out.println("[Launcher] Found Java 25+: " + java25);
-            relaunchWithJava(java25);
-            System.exit(0);
+            if (relaunchWithJava(java25)) {
+                System.exit(0);
+            } else {
+                showError("เปิดโปรแกรมใหม่ด้วย Java 25 ไม่สำเร็จ\n"
+                    + "Java path: " + java25 + "\n\n"
+                    + "ลองรัน macmahon-tesuji.jar ด้วยตนเองผ่าน command line:\n"
+                    + "\"" + java25 + "\" -jar macmahon-tesuji.jar");
+                System.exit(1);
+            }
         } else {
             JOptionPane.showMessageDialog(null,
                 "MacMahon requires Java 25+\n\n" +
                 "Current: Java " + version + "\n\n" +
-                "Download Amazon Corretto 25:\n" +
-                "https://corretto.aws/downloads/latest/amazon-corretto-25-x64-windows-jdk.msi",
+                javaInstallHint(),
                 "MacMahon Launcher", JOptionPane.ERROR_MESSAGE);
             System.exit(1);
         }
+    }
+
+    private static boolean isMac() {
+        return System.getProperty("os.name", "").toLowerCase().contains("mac");
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase().contains("win");
+    }
+
+    private static String javaInstallHint() {
+        if (isMac()) {
+            return "ติดตั้ง Java 25 (Temurin) ผ่าน Homebrew:\n"
+                + "  brew install --cask temurin\n\n"
+                + "หรือดาวน์โหลด .pkg จาก:\n"
+                + "https://adoptium.net/temurin/releases/?version=25";
+        }
+        return "Download Amazon Corretto 25:\n"
+            + "https://corretto.aws/downloads/latest/amazon-corretto-25-x64-windows-jdk.msi";
     }
 
     private static int getMajorVersion(String version) {
@@ -1125,6 +1256,44 @@ public class MacMahonLauncher {
     }
 
     private static String findJava25Path() {
+        if (isMac()) return findJava25Mac();
+        if (isWindows()) return findJava25Windows();
+        return findJava25Generic();
+    }
+
+    /**
+     * Locate Java 25+ on macOS. Prefers Apple's own JVM registry (java_home),
+     * which correctly finds any properly-installed JDK/JRE regardless of
+     * vendor (Temurin, Corretto, Zulu, ...) or install method (pkg, brew
+     * cask). Falls back to scanning the standard JVM bundle directory.
+     */
+    private static String findJava25Mac() {
+        try {
+            Process p = new ProcessBuilder("/usr/libexec/java_home", "-v", "25+").start();
+            String home = readProcessOutput(p).trim();
+            int exit = p.waitFor();
+            if (exit == 0 && !home.isEmpty()) {
+                File javaBin = new File(home, "bin/java");
+                if (javaBin.exists()) return javaBin.getAbsolutePath();
+            }
+        } catch (Exception e) {
+            System.err.println("[Launcher] java_home lookup failed: " + e.getMessage());
+        }
+
+        File jvmDir = new File("/Library/Java/JavaVirtualMachines");
+        File[] bundles = jvmDir.listFiles();
+        if (bundles != null) {
+            for (File bundle : bundles) {
+                if (bundle.getName().matches("(?i).*(?:jdk-?25|corretto-?25|temurin-?25|zulu.*25).*")) {
+                    File javaBin = new File(bundle, "Contents/Home/bin/java");
+                    if (javaBin.exists()) return javaBin.getAbsolutePath();
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String findJava25Windows() {
         String[] basePaths = {
             "C:\\Program Files\\Amazon Corretto",
             "C:\\Program Files\\Java",
@@ -1151,7 +1320,39 @@ public class MacMahonLauncher {
         return null;
     }
 
-    private static void relaunchWithJava(String javaPath) {
+    /** Best-effort lookup for other OSes (e.g. Linux) — JAVA_HOME, then /usr/lib/jvm. */
+    private static String findJava25Generic() {
+        String javaHomeEnv = System.getenv("JAVA_HOME");
+        if (javaHomeEnv != null) {
+            File javaBin = new File(javaHomeEnv, "bin/java");
+            if (javaBin.exists()) return javaBin.getAbsolutePath();
+        }
+        File jvmDir = new File("/usr/lib/jvm");
+        File[] children = jvmDir.listFiles();
+        if (children != null) {
+            for (File d : children) {
+                if (d.getName().matches(".*25.*")) {
+                    File javaBin = new File(d, "bin/java");
+                    if (javaBin.exists()) return javaBin.getAbsolutePath();
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String readProcessOutput(Process p) throws IOException {
+        BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream(), "UTF-8"));
+        try {
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = br.readLine()) != null) sb.append(line);
+            return sb.toString();
+        } finally {
+            br.close();
+        }
+    }
+
+    private static boolean relaunchWithJava(String javaPath) {
         try {
             String jarPath = new File(MacMahonLauncher.class.getProtectionDomain()
                 .getCodeSource().getLocation().toURI()).getAbsolutePath();
@@ -1160,8 +1361,11 @@ public class MacMahonLauncher {
             );
             pb.directory(new File(jarPath).getParentFile());
             pb.start();
+            return true;
         } catch (Exception e) {
             System.err.println("[Launcher] Relaunch failed: " + e.getMessage());
+            e.printStackTrace();
+            return false;
         }
     }
 

@@ -1,9 +1,54 @@
 ## MacMahon Launcher - Build Script
-$javac = "C:\Program Files\Amazon Corretto\jdk25.0.3_9\bin\javac.exe"
-$jar = "C:\Program Files\Amazon Corretto\jdk25.0.3_9\bin\jar.exe"
 $root = Split-Path $MyInvocation.MyCommand.Path
 
 Write-Host "=== MacMahon Launcher Build ===" -ForegroundColor Cyan
+
+# Find a JDK providing javac.exe + jar.exe — checks JAVA_HOME first, then
+# scans common install locations (newest version first) instead of a
+# hardcoded path that breaks on every JDK update.
+function Find-Jdk {
+    if ($env:JAVA_HOME) {
+        $javacPath = Join-Path $env:JAVA_HOME "bin\javac.exe"
+        $jarPath = Join-Path $env:JAVA_HOME "bin\jar.exe"
+        if ((Test-Path $javacPath) -and (Test-Path $jarPath)) {
+            return @{ Javac = $javacPath; Jar = $jarPath }
+        }
+    }
+
+    $searchRoots = @(
+        "C:\Program Files\Amazon Corretto",
+        "C:\Program Files\Java",
+        "C:\Program Files\Eclipse Adoptium",
+        "C:\Program Files\BellSoft",
+        "C:\Program Files\Microsoft"
+    )
+    $candidates = @()
+    foreach ($base in $searchRoots) {
+        if (Test-Path $base) {
+            $candidates += Get-ChildItem $base -Directory -ErrorAction SilentlyContinue
+        }
+    }
+    # Newest version-looking folder name first
+    $candidates = $candidates | Sort-Object Name -Descending
+    foreach ($dir in $candidates) {
+        $javacPath = Join-Path $dir.FullName "bin\javac.exe"
+        $jarPath = Join-Path $dir.FullName "bin\jar.exe"
+        if ((Test-Path $javacPath) -and (Test-Path $jarPath)) {
+            return @{ Javac = $javacPath; Jar = $jarPath }
+        }
+    }
+    return $null
+}
+
+$jdk = Find-Jdk
+if (-not $jdk) {
+    Write-Host "ERROR: No JDK found (checked JAVA_HOME and common install paths)" -ForegroundColor Red
+    Write-Host "Install a JDK (Amazon Corretto recommended) or set JAVA_HOME" -ForegroundColor Red
+    exit 1
+}
+$javac = $jdk.Javac
+$jar = $jdk.Jar
+Write-Host "      Using JDK: $javac" -ForegroundColor Green
 
 # Clean
 if (Test-Path "$root\build") { Remove-Item "$root\build" -Recurse -Force }

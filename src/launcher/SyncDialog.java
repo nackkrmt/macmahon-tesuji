@@ -22,7 +22,7 @@ public class SyncDialog extends JDialog {
     private JComboBox<String> roundCombo;
     private JButton verifyButton;
     private JButton autoFillButton;
-    private JButton fixNamesButton;
+    private JButton forcePairingButton;
     private JTable resultTable;
     private DefaultTableModel tableModel;
     private JLabel statusLabel;
@@ -30,14 +30,15 @@ public class SyncDialog extends JDialog {
 
     // Data
     private List<ComparisonRow> comparisonData = new ArrayList<ComparisonRow>();
+    private boolean updatingDivisions = false;
 
     // Reflection cache
     private Class<?> pairingClass;
-    private Object NO_RESULT, BLACK_WINS, WHITE_WINS, JIGO, BOTH_LOSE, BOTH_WIN;
+    private Object BLACK_WINS, WHITE_WINS, JIGO, BOTH_LOSE, BOTH_WIN;
     private Method getResultMethod, setResultMethod, getBoardNumberMethod, setBoardNumberMethod;
     private Method getBlackMethod, getWhiteMethod, getNameMethod;
     private Method getShortNameMethod;
-    private Method getGoPlayerMethod, setFirstNameMethod, setSurnameMethod, isAsianNameMethod;
+    private Method getGoPlayerMethod, setFirstNameMethod, setSurnameMethod;
 
     public SyncDialog(JFrame parent, Object appInstance, ClassLoader cl,
                       String tesujiUrl, String tesujiToken) throws Exception {
@@ -62,7 +63,6 @@ public class SyncDialog extends JDialog {
         Class<?> participantClass = cl.loadClass("de.cgerlach.macmahon.model.Participant");
 
         // Result constants
-        NO_RESULT = pairingClass.getField("NO_RESULT").get(null);
         BLACK_WINS = pairingClass.getField("BLACK_WINS").get(null);
         WHITE_WINS = pairingClass.getField("WHITE_WINS").get(null);
         JIGO = pairingClass.getField("JIGO").get(null);
@@ -85,7 +85,6 @@ public class SyncDialog extends JDialog {
         getGoPlayerMethod = individualClass.getMethod("getGoPlayer");
         setFirstNameMethod = personClass.getMethod("setFirstName", String.class);
         setSurnameMethod = personClass.getMethod("setSurname", String.class);
-        isAsianNameMethod = personClass.getMethod("isAsianName");
     }
 
     // ==================== UI ====================
@@ -94,8 +93,9 @@ public class SyncDialog extends JDialog {
         setLayout(new BorderLayout(8, 8));
         ((JPanel) getContentPane()).setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 
-        // Ensure Thai font for this dialog
-        Font thaiFont = new Font("TH Sarabun New", Font.PLAIN, 12);
+        // Ensure Thai font for this dialog — reuse the font the launcher already
+        // resolved for the running system (may not be "TH Sarabun New" if unavailable)
+        Font thaiFont = new Font(MacMahonLauncher.getChosenFontName(), Font.PLAIN, 12);
 
         // Top panel — Division + Round selection
         JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
@@ -122,12 +122,12 @@ public class SyncDialog extends JDialog {
         });
         topPanel.add(autoFillButton);
 
-        fixNamesButton = new JButton("Force Pairing");
-        fixNamesButton.setEnabled(false);
-        fixNamesButton.addActionListener(new ActionListener() {
+        forcePairingButton = new JButton("Force Pairing");
+        forcePairingButton.setEnabled(false);
+        forcePairingButton.addActionListener(new ActionListener() {
             public void actionPerformed(ActionEvent e) { doFixNames(); }
         });
-        topPanel.add(fixNamesButton);
+        topPanel.add(forcePairingButton);
 
         add(topPanel, BorderLayout.NORTH);
 
@@ -208,9 +208,13 @@ public class SyncDialog extends JDialog {
         bottomPanel.add(statusLabel, BorderLayout.SOUTH);
         add(bottomPanel, BorderLayout.SOUTH);
 
-        // Listen to division change to load rounds
+        // Listen to division change to load rounds (ignore events fired while
+        // we're programmatically populating the combo — see loadDivisions())
         divisionCombo.addActionListener(new ActionListener() {
-            public void actionPerformed(ActionEvent e) { loadRounds(); }
+            public void actionPerformed(ActionEvent e) {
+                if (updatingDivisions) return;
+                loadRounds();
+            }
         });
     }
 
@@ -225,35 +229,42 @@ public class SyncDialog extends JDialog {
             protected void done() {
                 try {
                     List<TesujiClient.Division> divs = get();
-                    divisionCombo.removeAllItems();
-                    for (TesujiClient.Division d : divs) {
-                        divisionCombo.addItem(d);
-                    }
-                    statusLabel.setText("Connected (" + divs.size() + " divisions)");
-                    statusLabel.setForeground(new Color(0, 128, 0));
-
-                    // Auto-select division matching MacMahon tournament name
+                    updatingDivisions = true;
                     try {
-                        String macTournamentName = getMacMahonTournamentName();
-                        System.out.println("[Sync] MacMahon tournament name: '" + macTournamentName + "'");
-                        if (!macTournamentName.isEmpty()) {
-                            TesujiClient.Division bestMatch = findBestDivisionMatch(macTournamentName, divs);
-                            if (bestMatch != null) {
-                                divisionCombo.setSelectedItem(bestMatch);
-                                statusLabel.setText("Connected (" + divs.size() + " divisions) — auto: " + bestMatch.name);
-                                System.out.println("[Sync] Auto-selected division: " + bestMatch.id + " = " + bestMatch.name);
-                            } else {
-                                statusLabel.setText("Connected (" + divs.size() + " divisions) — no match for: " + macTournamentName);
-                                System.out.println("[Sync] No division match found");
-                            }
-                        } else {
-                            statusLabel.setText("Connected (" + divs.size() + " divisions) — no tournament open");
-                            System.out.println("[Sync] No tournament name found");
+                        divisionCombo.removeAllItems();
+                        for (TesujiClient.Division d : divs) {
+                            divisionCombo.addItem(d);
                         }
-                    } catch (Exception ex) {
-                        System.err.println("[Sync] Auto-select division failed: " + ex.getMessage());
-                        ex.printStackTrace();
+                        statusLabel.setText("Connected (" + divs.size() + " divisions)");
+                        statusLabel.setForeground(new Color(0, 128, 0));
+
+                        // Auto-select division matching MacMahon tournament name
+                        try {
+                            String macTournamentName = getMacMahonTournamentName();
+                            System.out.println("[Sync] MacMahon tournament name: '" + macTournamentName + "'");
+                            if (!macTournamentName.isEmpty()) {
+                                TesujiClient.Division bestMatch = findBestDivisionMatch(macTournamentName, divs);
+                                if (bestMatch != null) {
+                                    divisionCombo.setSelectedItem(bestMatch);
+                                    statusLabel.setText("Connected (" + divs.size() + " divisions) — auto: " + bestMatch.name);
+                                    System.out.println("[Sync] Auto-selected division: " + bestMatch.id + " = " + bestMatch.name);
+                                } else {
+                                    statusLabel.setText("Connected (" + divs.size() + " divisions) — no match for: " + macTournamentName);
+                                    System.out.println("[Sync] No division match found");
+                                }
+                            } else {
+                                statusLabel.setText("Connected (" + divs.size() + " divisions) — no tournament open");
+                                System.out.println("[Sync] No tournament name found");
+                            }
+                        } catch (Exception ex) {
+                            System.err.println("[Sync] Auto-select division failed: " + ex.getMessage());
+                            ex.printStackTrace();
+                        }
+                    } finally {
+                        updatingDivisions = false;
                     }
+                    // Load rounds once, after the combo has settled on its final selection
+                    loadRounds();
                 } catch (Exception e) {
                     statusLabel.setText("Connection failed: " + e.getMessage());
                     statusLabel.setForeground(Color.RED);
@@ -454,7 +465,7 @@ public class SyncDialog extends JDialog {
         autoFillButton.setEnabled(ready > 0 || nameWarn > 0);
         String selectedRound = (String) roundCombo.getSelectedItem();
         boolean isRound1 = "1".equals(selectedRound);
-        fixNamesButton.setEnabled(nameWarn > 0 && isRound1);
+        forcePairingButton.setEnabled(nameWarn > 0 && isRound1);
         statusLabel.setText("Verified " + comparisonData.size() + " pairings");
         statusLabel.setForeground(new Color(0, 128, 0));
     }
@@ -793,12 +804,13 @@ public class SyncDialog extends JDialog {
             System.out.println("[Sync] Using getCurrentRound()");
         }
 
-        // Fallback: try getRound(index) — 0-indexed
+        // Fallback: try getRound(roundNumber) — 1-indexed (verified against Tournament bytecode:
+        // getRound(int i) returns m_rounds[i - 1])
         if (tournamentRound == null) {
             try {
                 Method getRound = tournament.getClass().getMethod("getRound", int.class);
-                tournamentRound = getRound.invoke(tournament, roundNumber - 1);
-                System.out.println("[Sync] Using getRound(" + (roundNumber - 1) + ")");
+                tournamentRound = getRound.invoke(tournament, roundNumber);
+                System.out.println("[Sync] Using getRound(" + roundNumber + ")");
             } catch (Exception e) {
                 System.err.println("[Sync] getRound failed: " + e.getMessage());
             }
