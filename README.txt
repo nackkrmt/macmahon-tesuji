@@ -374,18 +374,26 @@
     ทำให้ระบบรู้ว่า pairing ไหนตรงกับ TESUJI match ไหน
     แม้ว่าเลขโต๊ะจะต่างกัน
 
-  Force Pairing ทำ 2 อย่าง:
-    1. แก้เลขโต๊ะ - สำหรับ pairing ทุกคู่ที่จับคู่ได้
-       ถ้าเลขโต๊ะใน MacMahon ไม่ตรงกับ TESUJI table
-       -> เรียก setBoardNumber(tesujiTable, true)
+  Force Pairing ทำ 3 อย่าง:
+    1. ปักหมุดเลขโต๊ะ "ทุกคู่" ที่จับคู่กับ TESUJI ได้
+       -> เรียก setBoardNumber(tesujiTable, true) ทุกคู่ ไม่ใช่แค่คู่ที่ไม่ตรง
+       *** สำคัญ: setBoardNumber จะ trigger TournamentRound.doSort()
+       ซึ่ง renumber ทุกคู่ที่ไม่ได้ปักหมุด (non-fixed) ใหม่ตาม counter
+       ถ้าปักเฉพาะคู่ที่ไม่ตรง คู่ที่เคยตรงจะโดน renumber จนเลขเพี้ยน
+       และอาจได้เลขโต๊ะซ้ำกัน (counter กระโดดถอยหลังไปเลขที่ปักไว้) ***
 
-    2. แก้ชื่อ - สำหรับ pairing ที่ชื่อไม่ตรง
+    2. ปักหมุดคู่ที่เหลือ (bye / คู่ที่ TESUJI ไม่มี) ต่อท้ายโต๊ะสุดท้าย
+       กัน doSort renumber มาชนเลขโต๊ะที่ TESUJI ใช้อยู่
+
+    3. แก้ชื่อ - สำหรับ pairing ที่ชื่อไม่ตรง
        renameParticipant():
          Participant -> IndividualParticipant.getGoPlayer()
          -> Person.setFirstName("")
          -> Person.setSurname("ชื่อเต็มจาก TESUJI")
        ใส่ชื่อทั้งหมดลง surname field (firstName = "")
        เพราะชื่อไทยไม่ต้องแยก first/last
+
+  Guard: ถ้าข้อมูล TESUJI มีเลขโต๊ะซ้ำกัน -> ปฏิเสธพร้อมบอกเลขโต๊ะที่ซ้ำ
 
   Popup แสดง:
     - จำนวน board ที่จะแก้เลขโต๊ะ
@@ -394,8 +402,9 @@
 
   *** ปุ่ม Force Pairing enabled เมื่อ: ***
     - Round ที่เลือก = 1 (isRound1)
-    - nameWarn > 0 (มีชื่อไม่ตรงอย่างน้อย 1 คู่)
+    - nameWarn > 0 หรือ boardWarn > 0 (ชื่อหรือเลขโต๊ะไม่ตรงอย่างน้อย 1 คู่)
     - ต้อง Verify ก่อนเสมอ
+    (status ในตารางโชว์ "(Board!)" และ summary มี Board warn ให้เห็นด้วย)
 
 ============================================================
   6. TESUJI API CLIENT

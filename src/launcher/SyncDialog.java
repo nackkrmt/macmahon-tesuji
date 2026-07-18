@@ -184,7 +184,7 @@ public class SyncDialog extends JDialog {
                 c.setFont(thaiFont);
                 if (val != null) {
                     String s = val.toString();
-                    if (s.contains("Name")) c.setBackground(new Color(255, 180, 100));
+                    if (s.contains("Name") || s.contains("Board")) c.setBackground(new Color(255, 180, 100));
                     else if (s.equals("Match")) c.setBackground(new Color(200, 255, 200));
                     else if (s.contains("Mismatch")) c.setBackground(new Color(255, 200, 200));
                     else if (s.contains("Ready")) c.setBackground(new Color(200, 220, 255));
@@ -437,9 +437,14 @@ public class SyncDialog extends JDialog {
 
     private void updateTable() {
         tableModel.setRowCount(0);
-        int matched = 0, mismatched = 0, pending = 0, ready = 0, nameWarn = 0;
+        int matched = 0, mismatched = 0, pending = 0, ready = 0, nameWarn = 0, boardWarn = 0;
 
         for (ComparisonRow row : comparisonData) {
+            // Board mismatch is tracked separately from row.status (which drives
+            // auto-fill via exact string matches) — only the DISPLAYED text gets
+            // the "(Board!)" marker.
+            boolean boardOff = row.macPairing != null && !row.boardMatch;
+            if (boardOff) boardWarn++;
             tableModel.addRow(new Object[]{
                 row.boardNumber,
                 row.tesujiBlack,
@@ -448,7 +453,7 @@ public class SyncDialog extends JDialog {
                 row.macWhite,
                 formatResult(row.tesujiResult),
                 formatResult(row.macResult),
-                row.status
+                row.status + (boardOff ? " (Board!)" : "")
             });
 
             if (row.status.contains("Name")) nameWarn++;
@@ -459,13 +464,15 @@ public class SyncDialog extends JDialog {
         }
 
         summaryLabel.setText(String.format(
-            "Match: %d | Mismatch: %d | Pending: %d | Ready: %d | Name warn: %d",
-            matched, mismatched, pending, ready, nameWarn));
+            "Match: %d | Mismatch: %d | Pending: %d | Ready: %d | Name warn: %d | Board warn: %d",
+            matched, mismatched, pending, ready, nameWarn, boardWarn));
 
         autoFillButton.setEnabled(ready > 0 || nameWarn > 0);
         String selectedRound = (String) roundCombo.getSelectedItem();
         boolean isRound1 = "1".equals(selectedRound);
-        forcePairingButton.setEnabled(nameWarn > 0 && isRound1);
+        // Board-only mismatches must also enable the button — otherwise a run
+        // that fixed all names but left boards shuffled can never be re-run.
+        forcePairingButton.setEnabled((nameWarn > 0 || boardWarn > 0) && isRound1);
         statusLabel.setText("Verified " + comparisonData.size() + " pairings");
         statusLabel.setForeground(new Color(0, 128, 0));
     }
@@ -627,6 +634,20 @@ public class SyncDialog extends JDialog {
             return;
         }
 
+        // Guard: duplicate table numbers in TESUJI data would pin two MacMahon
+        // pairings to the same board — refuse and point at the bad data instead.
+        java.util.Set<Integer> seenTables = new java.util.HashSet<Integer>();
+        for (ComparisonRow row : comparisonData) {
+            if (row.macPairing == null) continue;
+            if (!seenTables.add(row.boardNumber)) {
+                JOptionPane.showMessageDialog(this,
+                    "ข้อมูล TESUJI มีเลขโต๊ะซ้ำ: Table " + row.boardNumber
+                        + "\nกรุณาแก้ข้อมูลบน TESUJI ก่อนทำ Force Pairing",
+                    "Force Pairing", JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+        }
+
         // Build detail list
         StringBuilder detail = new StringBuilder();
         if (boardMismatch > 0) {
@@ -656,26 +677,37 @@ public class SyncDialog extends JDialog {
             }
             detail.append("\n");
         }
-        detail.append("แก้ไขใน MacMahon ให้ตรงกับ TESUJI?");
+        detail.append("แก้ไขใน MacMahon ให้ตรงกับ TESUJI?\n");
+        detail.append("(เลขโต๊ะทุกคู่จะถูกปักหมุด (fixed) ตามเลขโต๊ะ TESUJI\n");
+        detail.append(" เพื่อไม่ให้ MacMahon renumber เองแล้วเลขเพี้ยน)");
 
         int confirm = JOptionPane.showConfirmDialog(this, detail.toString(),
             "Force Pairing", JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE);
         if (confirm != JOptionPane.OK_OPTION) return;
 
         int nameFixed = 0, boardFixed = 0, failed = 0;
+        java.util.Set<Object> pinnedPairings = new java.util.HashSet<Object>();
+        int maxTable = 0;
         for (ComparisonRow row : comparisonData) {
             if (row.macPairing == null) continue;
 
-            // 1) Fix board number for ALL matched pairings
-            if (!row.boardMatch) {
-                try {
-                    int currentBoard = (Integer) getBoardNumberMethod.invoke(row.macPairing);
-                    setBoardNumberMethod.invoke(row.macPairing, row.boardNumber, true);
+            // 1) Pin board number for EVERY matched pairing — not just mismatched
+            // ones. MacMahon's setBoardNumber triggers TournamentRound.doSort(),
+            // which renumbers all NON-fixed pairings sequentially; pinning only
+            // the mismatched pairs let that pass shuffle previously-correct
+            // boards (and even produce duplicate numbers). Pinning everything
+            // TESUJI knows makes the final state exact and order-independent.
+            try {
+                int currentBoard = (Integer) getBoardNumberMethod.invoke(row.macPairing);
+                setBoardNumberMethod.invoke(row.macPairing, row.boardNumber, true);
+                pinnedPairings.add(row.macPairing);
+                if (row.boardNumber > maxTable) maxTable = row.boardNumber;
+                if (currentBoard != row.boardNumber) {
                     boardFixed++;
                     System.out.println("[Sync] Board " + currentBoard + " -> Table " + row.boardNumber);
-                } catch (Exception e) {
-                    System.err.println("[Sync] Set board failed: " + e.getMessage());
                 }
+            } catch (Exception e) {
+                System.err.println("[Sync] Set board failed: " + e.getMessage());
             }
 
             // 2) Fix names for mismatched ones
@@ -699,6 +731,21 @@ public class SyncDialog extends JDialog {
                     }
                 }
             }
+        }
+
+        // 3) Pin leftover pairings (bye / pairs TESUJI doesn't know) to boards
+        // AFTER the last TESUJI table. Left unpinned, doSort()'s renumber pass
+        // could slot them onto a table number TESUJI already uses.
+        try {
+            int roundNum = Integer.parseInt((String) roundCombo.getSelectedItem());
+            for (Object pairing : getMacMahonPairingList(roundNum)) {
+                if (pinnedPairings.contains(pairing)) continue;
+                maxTable++;
+                setBoardNumberMethod.invoke(pairing, maxTable, true);
+                System.out.println("[Sync] Leftover pairing pinned to board " + maxTable);
+            }
+        } catch (Exception e) {
+            System.err.println("[Sync] Leftover pin failed: " + e.getMessage());
         }
 
         refreshMacMahonUI();
@@ -786,7 +833,7 @@ public class SyncDialog extends JDialog {
         return (Integer) getCurrentRound.invoke(tournament);
     }
 
-    private Map<Integer, Object> getMacMahonPairings(int roundNumber) throws Exception {
+    private Object findMacMahonRound(int roundNumber) throws Exception {
         Method getTournament = appInstance.getClass().getMethod("getTournament");
         Object tournament = getTournament.invoke(appInstance);
         if (tournament == null) throw new Exception("กรุณาเปิด Tournament ใน MacMahon ก่อน");
@@ -836,6 +883,22 @@ public class SyncDialog extends JDialog {
         if (tournamentRound == null) {
             throw new Exception("Round " + roundNumber + " ไม่พบใน MacMahon (currentRound=" + currentRound + ")");
         }
+        return tournamentRound;
+    }
+
+    /**
+     * All pairings of a round as a COPY — safe to iterate while calling
+     * setBoardNumber (which re-sorts the underlying live list via doSort()).
+     */
+    private List<Object> getMacMahonPairingList(int roundNumber) throws Exception {
+        Object tournamentRound = findMacMahonRound(roundNumber);
+        Method getPairings = tournamentRound.getClass().getMethod("getPairings");
+        List<?> pairings = (List<?>) getPairings.invoke(tournamentRound);
+        return pairings != null ? new ArrayList<Object>(pairings) : new ArrayList<Object>();
+    }
+
+    private Map<Integer, Object> getMacMahonPairings(int roundNumber) throws Exception {
+        Object tournamentRound = findMacMahonRound(roundNumber);
 
         // getPairings()
         Method getPairings = tournamentRound.getClass().getMethod("getPairings");
