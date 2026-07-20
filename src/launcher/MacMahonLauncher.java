@@ -17,44 +17,49 @@ import java.util.Properties;
 public class MacMahonLauncher {
 
     private static final String PROPERTIES_FILE = "launcher.properties";
+    private static final String DEFAULT_TESUJI_URL = "https://tesuji-reg.vercel.app";
     private static String tesujiUrl = "";
     private static String tesujiToken = "";
     private static URLClassLoader macmahonClassLoader;
     private static Object appInstance; // MacMahonApplication instance
-    private static String chosenFontName = "TH Sarabun New";
 
-    /** The Thai-compatible font family resolved for this system (see setupThaiFont()). */
-    public static String getChosenFontName() {
-        return chosenFontName;
-    }
-
-    private static File tournamentFileToOpen = null;
     private static File[] allTournamentFiles = null;
+    /** False when the loaded MacMahon JAR failed the compatibility check. */
+    private static boolean tesujiFeaturesEnabled = true;
 
     public static void main(String[] args) {
+        setupFileLogging();
         System.out.println("[Launcher] MacMahon Launcher starting...");
 
         // Step 0: Ensure Java 25+ — if running on older Java, find Java 25 and relaunch
-        ensureJava25();
+        JavaFinder.ensureJava25();
 
         // Step 0b: Set UTF-8 encoding + Thai-compatible font
         System.setProperty("file.encoding", "UTF-8");
         // Put the menu bar at the top of the screen like a native Mac app,
         // instead of inside the window. Must be set before any AWT/Swing
         // class touches the Toolkit (i.e. before setupThaiFont() below).
-        if (isMac()) {
+        if (JavaFinder.isMac()) {
             System.setProperty("apple.laf.useScreenMenuBar", "true");
         }
-        setupThaiFont();
+        ThaiFontManager.setupThaiFont();
 
         // Step 1: Read config
         Properties props = loadOrCreateProperties();
-        tesujiUrl = props.getProperty("tesuji.url", "https://tesuji-reg.vercel.app").trim();
+        tesujiUrl = props.getProperty("tesuji.url", DEFAULT_TESUJI_URL).trim();
         tesujiToken = props.getProperty("tesuji.token", "").trim();
         if (tesujiUrl.endsWith("/")) {
             tesujiUrl = tesujiUrl.substring(0, tesujiUrl.length() - 1);
         }
         System.out.println("[Launcher] TESUJI URL: " + tesujiUrl);
+        if (tesujiUrl.startsWith("http://")) {
+            System.err.println("[Launcher] WARNING: tesuji.url is plain http — admin token would be sent unencrypted");
+            JOptionPane.showMessageDialog(null,
+                "คำเตือน: tesuji.url ใน launcher.properties เป็น http (ไม่เข้ารหัส)\n" +
+                "token ผู้ดูแลจะถูกส่งผ่านเครือข่ายแบบอ่านได้\n" +
+                "แนะนำให้เปลี่ยนเป็น https", "MacMahon Launcher",
+                JOptionPane.WARNING_MESSAGE);
+        }
 
         // Scan for .xml tournament files in same folder
         allTournamentFiles = scanTournamentFiles();
@@ -82,6 +87,30 @@ public class MacMahonLauncher {
             showError("โหลด MacMahon JAR ไม่สำเร็จ: " + e.getMessage());
             System.exit(1);
             return;
+        }
+
+        // Step 3b: Verify the MacMahon internals we touch via reflection.
+        // A different MacMahon version would otherwise fail silently,
+        // feature by feature, in the middle of a live tournament.
+        java.util.List<String> missingMembers = checkMacMahonCompat(macmahonClassLoader);
+        if (!missingMembers.isEmpty()) {
+            tesujiFeaturesEnabled = false;
+            System.err.println("[Launcher] MacMahon compat check FAILED — missing: " + missingMembers);
+            StringBuilder few = new StringBuilder();
+            for (int i = 0; i < missingMembers.size() && i < 8; i++) {
+                few.append("  - ").append(missingMembers.get(i)).append("\n");
+            }
+            if (missingMembers.size() > 8) {
+                few.append("  ... และอีก ").append(missingMembers.size() - 8).append(" รายการ\n");
+            }
+            JOptionPane.showMessageDialog(null,
+                "MacMahon JAR ที่พบไม่ตรงกับเวอร์ชันที่ Launcher รองรับ (3.10)\n"
+                + "ฟีเจอร์ TESUJI (เมนู Sync/Export และ tab bar) จะถูกปิด\n"
+                + "ตัวโปรแกรม MacMahon เองยังใช้งานได้ตามปกติ\n\n"
+                + "ส่วนที่หายไป:\n" + few,
+                "MacMahon Launcher — Compatibility", JOptionPane.WARNING_MESSAGE);
+        } else {
+            System.out.println("[Launcher] MacMahon compat check OK");
         }
 
         // Step 4: Launch MacMahon
@@ -112,13 +141,15 @@ public class MacMahonLauncher {
                                 if (jf.getJMenuBar() != null && jf.getJMenuBar().getMenuCount() > 0) {
                                     System.out.println("[Launcher] JFrame found, injecting menu...");
                                     findAppInstance(jf);
-                                    applyThaiFontToAll(jf);
-                                    injectMenu(jf);
-                                    // Inject tab bar if multiple .xml files found
-                                    if (allTournamentFiles != null && allTournamentFiles.length > 0) {
-                                        injectTabBar(jf, allTournamentFiles);
+                                    ThaiFontManager.applyThaiFontToAll(jf);
+                                    if (tesujiFeaturesEnabled) {
+                                        injectMenu(jf);
+                                        // Inject tab bar if multiple .xml files found
+                                        if (allTournamentFiles != null && allTournamentFiles.length > 0) {
+                                            injectTabBar(jf, allTournamentFiles);
+                                        }
                                     }
-                                    startFontMaintenanceTimer();
+                                    ThaiFontManager.startFontMaintenanceTimer();
                                     timer.stop();
                                 }
                             }
@@ -168,7 +199,7 @@ public class MacMahonLauncher {
      * integer first (so "2 - ..." sorts before "10 - ..."), falling back to
      * plain case-insensitive string comparison.
      */
-    private static int compareTournamentFileNames(String a, String b) {
+    static int compareTournamentFileNames(String a, String b) {
         java.util.regex.Matcher ma = java.util.regex.Pattern.compile("^(\\d+)").matcher(a);
         java.util.regex.Matcher mb = java.util.regex.Pattern.compile("^(\\d+)").matcher(b);
         if (ma.find() && mb.find()) {
@@ -195,7 +226,7 @@ public class MacMahonLauncher {
             String label = xmlFiles[i].getName().replaceFirst("(?i)\\.xml$", "");
             JButton btn = new JButton(label);
             btn.setFocusPainted(false);
-            btn.setFont(new Font(chosenFontName, Font.BOLD, 14));
+            btn.setFont(new Font(ThaiFontManager.getChosenFontName(), Font.BOLD, 14));
             btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
             btn.setOpaque(true);
             btn.addActionListener(new java.awt.event.ActionListener() {
@@ -328,11 +359,11 @@ public class MacMahonLauncher {
             if (i == activeIndex) {
                 tabButtons[i].setBackground(activeBg);
                 tabButtons[i].setForeground(activeFg);
-                tabButtons[i].setFont(new Font(chosenFontName, Font.BOLD, 14));
+                tabButtons[i].setFont(new Font(ThaiFontManager.getChosenFontName(), Font.BOLD, 14));
             } else {
                 tabButtons[i].setBackground(inactiveBg);
                 tabButtons[i].setForeground(inactiveFg);
-                tabButtons[i].setFont(new Font(chosenFontName, Font.PLAIN, 14));
+                tabButtons[i].setFont(new Font(ThaiFontManager.getChosenFontName(), Font.PLAIN, 14));
             }
             tabButtons[i].setOpaque(true);
             tabButtons[i].setBorderPainted(false);
@@ -404,71 +435,6 @@ public class MacMahonLauncher {
             System.err.println("[Launcher] Failed to find app instance: " + e.getMessage());
             e.printStackTrace();
         }
-    }
-
-    /**
-     * Recursively apply Thai-compatible font to ALL components
-     * in the MacMahon JFrame (overrides MacMahon's own font choices).
-     */
-    private static void applyThaiFontToAll(Container container) {
-        Font thaiFont = new Font(chosenFontName, Font.PLAIN, 12);
-        Font thaiFontBold = new Font(chosenFontName, Font.BOLD, 12);
-        tableFoundCount = 0;
-        int changed = applyFontRecursive(container, thaiFont, thaiFontBold);
-        // Only log when this pass actually changed something — the maintenance
-        // timer calls this every 5s and most passes are no-ops once fonts settle.
-        if (changed > 0) {
-            System.out.println("[Launcher] Thai font applied — " + changed + " components changed, "
-                + tableFoundCount + " JTables found");
-        }
-    }
-
-    private static int tableFoundCount = 0;
-
-    private static int applyFontRecursive(Container container, Font normal, Font bold) {
-        int changed = 0;
-        for (Component comp : container.getComponents()) {
-            // Preserve original style (bold/italic) — only change font family
-            if (preserveFontFamily(comp)) changed++;
-
-            if (comp instanceof JTable) {
-                JTable table = (JTable) comp;
-                wrapTableRenderers(table, normal, bold);
-                tableFoundCount++;
-            }
-            if (comp instanceof JMenuBar) {
-                JMenuBar mb = (JMenuBar) comp;
-                for (int i = 0; i < mb.getMenuCount(); i++) {
-                    JMenu menu = mb.getMenu(i);
-                    if (menu != null) {
-                        if (preserveFontFamily(menu)) changed++;
-                        for (int j = 0; j < menu.getItemCount(); j++) {
-                            JMenuItem item = menu.getItem(j);
-                            if (item != null && preserveFontFamily(item)) changed++;
-                        }
-                    }
-                }
-            }
-            if (comp instanceof Container) {
-                changed += applyFontRecursive((Container) comp, normal, bold);
-            }
-        }
-        return changed;
-    }
-
-    /**
-     * Change font family to Thai-compatible font while preserving style (bold/italic) and size.
-     * No-op if the component's font family already matches — avoids churning
-     * setFont()/repaint() on every component on every maintenance timer tick.
-     * Returns true iff the font was actually changed.
-     */
-    private static boolean preserveFontFamily(Component comp) {
-        Font current = comp.getFont();
-        if (current != null && !chosenFontName.equals(current.getName())) {
-            comp.setFont(new Font(chosenFontName, current.getStyle(), current.getSize()));
-            return true;
-        }
-        return false;
     }
 
     /**
@@ -569,27 +535,35 @@ public class MacMahonLauncher {
     }
 
     /**
-     * Extract division ID and name from tab file name.
-     * "01 - 1-2 Kyu.xml" -> id="1", name="1-2 Kyu"
+     * Extract division ID and name from the active tab's file name.
+     * "01 - 1-2 Kyu.xml" -> id="01", name="1-2 Kyu".
+     * Returns null when there is no active tab or the name has no leading
+     * division number — callers must refuse to export then: guessing a
+     * default division here would delete/overwrite ANOTHER division's data
+     * on the server (exports clear the target round first).
      */
     private static String[] getDivisionInfo() {
-        String divId = "1";
-        String divName = "Division 1";
-        if (allTournamentFiles != null && activeTabIndex >= 0 && activeTabIndex < allTournamentFiles.length) {
-            String fileName = allTournamentFiles[activeTabIndex].getName().replaceFirst("(?i)\\.xml$", "");
-            java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("^(\\d+)\\s*-\\s*(.+)$").matcher(fileName);
-            if (matcher.find()) {
-                divId = matcher.group(1); // keep as-is: "01", "02", etc.
-                divName = matcher.group(2).trim();
-            } else {
-                java.util.regex.Matcher m2 = java.util.regex.Pattern.compile("^(\\d+)").matcher(fileName);
-                if (m2.find()) {
-                    divId = m2.group(1);
-                    divName = fileName;
-                }
-            }
+        if (allTournamentFiles == null || activeTabIndex < 0 || activeTabIndex >= allTournamentFiles.length) {
+            return null;
         }
-        return new String[]{divId, divName};
+        String fileName = allTournamentFiles[activeTabIndex].getName().replaceFirst("(?i)\\.xml$", "");
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("^(\\d+)\\s*-\\s*(.+)$").matcher(fileName);
+        if (matcher.find()) {
+            return new String[]{matcher.group(1), matcher.group(2).trim()}; // keep id as-is: "01", "02", ...
+        }
+        java.util.regex.Matcher m2 = java.util.regex.Pattern.compile("^(\\d+)").matcher(fileName);
+        if (m2.find()) {
+            return new String[]{m2.group(1), fileName};
+        }
+        return null;
+    }
+
+    /** Explain the file-naming rule exports depend on, then let the caller abort. */
+    private static void showDivisionNamingError() {
+        showError("ระบุ Division จากชื่อไฟล์ไม่ได้ — ยกเลิกการ Export\n\n"
+            + "การ Export ต้องเปิดทัวร์นาเมนต์ผ่าน tab และชื่อไฟล์ต้องขึ้นต้นด้วยเลข Division เช่น\n"
+            + "   \"01 - 1-2 Kyu.xml\"   หรือ   \"2 - Open.xml\"\n\n"
+            + "กรุณาเปลี่ยนชื่อไฟล์ .xml แล้วเปิดโปรแกรมใหม่อีกครั้ง");
     }
 
     /**
@@ -652,6 +626,7 @@ public class MacMahonLauncher {
             }
 
             final String[] divInfo = getDivisionInfo();
+            if (divInfo == null) { showDivisionNamingError(); return; }
             final String roundStr = String.valueOf(roundNum);
 
             // Everything from here on may touch the network — run it off the EDT
@@ -760,6 +735,7 @@ public class MacMahonLauncher {
             }
 
             final String[] divInfo = getDivisionInfo();
+            if (divInfo == null) { showDivisionNamingError(); return; }
 
             // Everything from here on may touch the network — run it off the EDT
             // so a slow/unreachable TESUJI server never freezes the whole app.
@@ -773,7 +749,7 @@ public class MacMahonLauncher {
                         try {
                             java.util.List<TesujiClient.Division> divisions = client.getDivisions();
                             for (TesujiClient.Division d : divisions) {
-                                if (d.id.equals(divInfo[0])) {
+                                if (TesujiClient.sameDivisionId(d.id, divInfo[0])) {
                                     standingsExist = true;
                                     break;
                                 }
@@ -818,216 +794,126 @@ public class MacMahonLauncher {
         }
     }
 
-    // ==================== Thai Font Setup ====================
+    // ==================== Helpers ====================
 
     /**
-     * Set up Thai-compatible font for all Swing components.
-     * Without this, Thai characters appear as boxes/question marks.
+     * Duplicate System.out/err into launcher.log next to the jar, so
+     * problems can still be diagnosed when the app was started by
+     * double-click (no console). Truncated on every start to stay small.
      */
-    private static void setupThaiFont() {
+    private static void setupFileLogging() {
         try {
-            // Find best Thai-compatible font available on this system.
-            // "Thonburi"/"Ayuthaya"/"Krungthep"/"Silom"/"Sathu" are Apple's own
-            // Thai-script fonts, bundled on macOS (verified present via
-            // GraphicsEnvironment on a real Mac) — harmless on Windows since
-            // they simply won't be in the available-fonts set there.
-            String[] preferredFonts = {"TH Sarabun New", "TH SarabunPSK", "Sarabun",
-                                        "Thonburi", "Ayuthaya", "Krungthep", "Silom", "Sathu",
-                                        "Tahoma", "Leelawadee UI", "Segoe UI", "Cordia New",
-                                        "Microsoft Sans Serif"};
-            GraphicsEnvironment ge = GraphicsEnvironment.getLocalGraphicsEnvironment();
-            java.util.Set<String> available = new java.util.HashSet<String>(
-                java.util.Arrays.asList(ge.getAvailableFontFamilyNames())
-            );
-
-            String chosenFont = "TH Sarabun New"; // default fallback
-            for (String pf : preferredFonts) {
-                if (available.contains(pf)) {
-                    chosenFont = pf;
-                    break;
-                }
-            }
-            chosenFontName = chosenFont; // store globally
-
-            System.out.println("[Launcher] Using font: " + chosenFont);
-            Font thaiFont = new Font(chosenFont, Font.PLAIN, 12);
-
-            // Diagnostic: can this font display Thai?
-            int canDisplay = thaiFont.canDisplayUpTo("กขคงจฉช");
-            System.out.println("[Launcher] Font '" + chosenFont + "' canDisplayUpTo Thai: " + canDisplay
-                + " (family=" + thaiFont.getFamily() + ", name=" + thaiFont.getFontName() + ")");
-            if (canDisplay != -1) {
-                System.err.println("[Launcher] WARNING: Font cannot display Thai characters!");
-            }
-
-            // Override ALL Swing component default fonts
-            try {
-                UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
-            } catch (Exception e) {
-                // ignore
-            }
-
-            javax.swing.plaf.FontUIResource fontResource =
-                new javax.swing.plaf.FontUIResource(chosenFont, Font.PLAIN, 12);
-
-            java.util.Enumeration<Object> keys = UIManager.getDefaults().keys();
-            while (keys.hasMoreElements()) {
-                Object key = keys.nextElement();
-                Object value = UIManager.get(key);
-                if (value instanceof javax.swing.plaf.FontUIResource) {
-                    UIManager.put(key, fontResource);
-                }
-            }
-
-            // Also set specific components that might be missed
-            String[] fontKeys = {
-                "Label.font", "Button.font", "MenuItem.font", "Menu.font",
-                "MenuBar.font", "ComboBox.font", "Table.font", "TableHeader.font",
-                "TextField.font", "TextArea.font", "OptionPane.messageFont",
-                "OptionPane.buttonFont", "TabbedPane.font", "List.font",
-                "Panel.font", "ScrollPane.font", "ToolTip.font",
-                "Tree.font", "Spinner.font", "TitledBorder.font",
-                "EditorPane.font", "FormattedTextField.font"
-            };
-            for (String fk : fontKeys) {
-                UIManager.put(fk, fontResource);
-            }
-
-            // Install global AWT listener to catch ALL components as they're added
-            installGlobalFontListener(chosenFont);
-
+            File logFile = new File(getLauncherDir(), "launcher.log");
+            PrintStream fileStream = new PrintStream(new FileOutputStream(logFile, false), true, "UTF-8");
+            System.setOut(new TeePrintStream(System.out, fileStream));
+            System.setErr(new TeePrintStream(System.err, fileStream));
+            System.out.println("[Launcher] Log: " + logFile.getAbsolutePath()
+                + " | " + new java.util.Date()
+                + " | Java " + System.getProperty("java.version")
+                + " | " + System.getProperty("os.name"));
         } catch (Exception e) {
-            System.err.println("[Launcher] Font setup warning: " + e.getMessage());
+            System.err.println("[Launcher] File logging unavailable: " + e.getMessage());
+        }
+    }
+
+    /** PrintStream that writes everything to two streams (console + log file). */
+    private static class TeePrintStream extends PrintStream {
+        private final PrintStream second;
+
+        TeePrintStream(PrintStream first, PrintStream second) throws UnsupportedEncodingException {
+            super(first, true, "UTF-8");
+            this.second = second;
+        }
+
+        public void write(int b) {
+            super.write(b);
+            second.write(b);
+        }
+
+        public void write(byte[] buf, int off, int len) {
+            super.write(buf, off, len);
+            second.write(buf, off, len);
+        }
+
+        public void flush() {
+            super.flush();
+            second.flush();
+        }
+
+        public void close() {
+            super.close();
+            second.close();
         }
     }
 
     /**
-     * Global AWT event listener that intercepts ALL component additions.
-     * When any component is added to any container, we set Thai-compatible font on it.
-     * This catches MacMahon's tables/labels as they're created — no timer needed.
+     * Verify every MacMahon class/method/field the launcher and SyncDialog
+     * touch via reflection ("m:" = method by name, "f:" = field). The list
+     * is verified against macmahon-3.10.jar. Returns the missing members;
+     * empty list = fully compatible. loadClass() does not run static
+     * initializers, so this is side-effect-free before the app starts.
      */
-    private static void installGlobalFontListener(final String fontName) {
-        final Font normal = new Font(fontName, Font.PLAIN, 12);
-        final Font bold = new Font(fontName, Font.BOLD, 12);
+    private static java.util.List<String> checkMacMahonCompat(ClassLoader cl) {
+        String[][] targets = {
+            {"de.cgerlach.macmahon.gui.MacMahonApplication",
+                "m:main", "m:getTournament", "m:tournamentSave", "m:tournamentOpenInternal",
+                "m:tournamentOpened", "m:fireWalllistTableDataChanged", "m:firePairingsTableDataChanged",
+                "f:m_tournament", "f:m_mainWindow"},
+            {"de.cgerlach.macmahon.gui.MacMahonMainWindow", "m:getJTableWalllist", "f:m_application"},
+            {"de.cgerlach.macmahon.model.Tournament",
+                "m:getCurrentRoundNumber", "m:getRound", "m:getCurrentRound", "m:getName",
+                "m:buildParticipantScores", "f:m_rounds"},
+            {"de.cgerlach.macmahon.model.TournamentRound", "m:getPairings"},
+            {"de.cgerlach.macmahon.model.Pairing",
+                "f:BLACK_WINS", "f:WHITE_WINS", "f:JIGO", "f:BOTH_LOSE", "f:BOTH_WIN",
+                "m:getResult", "m:setResult", "m:getBoardNumber", "m:setBoardNumber",
+                "m:getBlack", "m:getWhite", "m:isPairingWithBye"},
+            {"de.cgerlach.macmahon.model.Pairing$ResultDescriptor", "m:getShortName"},
+            {"de.cgerlach.macmahon.model.Participant",
+                "m:getName", "m:getScoreAfterRound", "m:getScoreDisplayString"},
+            {"de.cgerlach.macmahon.model.IndividualParticipant", "m:getGoPlayer"},
+            {"de.cgerlach.macmahon.model.Person", "m:setFirstName", "m:setSurname"},
+        };
 
-        Toolkit.getDefaultToolkit().addAWTEventListener(new java.awt.event.AWTEventListener() {
-            public void eventDispatched(AWTEvent event) {
-                if (event instanceof java.awt.event.ContainerEvent) {
-                    java.awt.event.ContainerEvent ce = (java.awt.event.ContainerEvent) event;
-                    if (ce.getID() == java.awt.event.ContainerEvent.COMPONENT_ADDED) {
-                        final Component child = ce.getChild();
-                        setThaiFontOnComponent(child, normal, bold);
-                        // For JTables, also schedule renderer wrapping after setup completes
-                        if (child instanceof JTable) {
-                            SwingUtilities.invokeLater(new Runnable() {
-                                public void run() {
-                                    wrapTableRenderers((JTable) child, normal, bold);
-                                }
-                            });
+        java.util.List<String> missing = new java.util.ArrayList<String>();
+        for (String[] entry : targets) {
+            String className = entry[0];
+            Class<?> c;
+            try {
+                c = cl.loadClass(className);
+            } catch (Throwable t) {
+                missing.add(className + " (class)");
+                continue;
+            }
+            String shortName = className.substring(className.lastIndexOf('.') + 1);
+            for (int i = 1; i < entry.length; i++) {
+                String member = entry[i].substring(2);
+                boolean found = false;
+                if (entry[i].startsWith("m:")) {
+                    for (Method m : c.getMethods()) {
+                        if (m.getName().equals(member)) { found = true; break; }
+                    }
+                    if (!found) {
+                        for (Method m : c.getDeclaredMethods()) {
+                            if (m.getName().equals(member)) { found = true; break; }
                         }
                     }
-                }
-            }
-        }, AWTEvent.CONTAINER_EVENT_MASK);
-        System.out.println("[Launcher] Global font listener installed");
-    }
-
-    /**
-     * Set Thai font on a single component.
-     */
-    private static void setThaiFontOnComponent(Component comp, Font normal, Font bold) {
-        // Preserve original style (bold/italic) — only change font family
-        Font current = comp.getFont();
-        if (current == null) {
-            comp.setFont(normal);
-        } else if (!chosenFontName.equals(current.getName())) {
-            comp.setFont(new Font(chosenFontName, current.getStyle(), current.getSize()));
-        }
-        if (comp instanceof JTable) {
-            JTable table = (JTable) comp;
-            if (table.getTableHeader() != null) {
-                Font hf = table.getTableHeader().getFont();
-                if (hf != null && !chosenFontName.equals(hf.getName())) {
-                    table.getTableHeader().setFont(new Font(chosenFontName, hf.getStyle(), hf.getSize()));
-                }
-            }
-        }
-    }
-
-    /**
-     * Wrap ALL renderers on a JTable with ThaiCellRenderer to force Thai font.
-     */
-    private static void wrapTableRenderers(JTable table, Font normal, Font bold) {
-        try {
-            boolean headerWrapped = false;
-            // Wrap header renderer
-            if (table.getTableHeader() != null) {
-                TableCellRenderer headerRenderer = table.getTableHeader().getDefaultRenderer();
-                if (headerRenderer != null && !(headerRenderer instanceof ThaiCellRenderer)) {
-                    table.getTableHeader().setDefaultRenderer(new ThaiCellRenderer(headerRenderer, bold));
-                    headerWrapped = true;
-                }
-            }
-
-            // Wrap default renderers for ALL column classes used in this table
-            java.util.Set<Class<?>> classesWrapped = new java.util.HashSet<Class<?>>();
-            classesWrapped.add(Object.class);
-            classesWrapped.add(String.class);
-            classesWrapped.add(Number.class);
-            classesWrapped.add(Integer.class);
-            classesWrapped.add(Double.class);
-            classesWrapped.add(Float.class);
-            classesWrapped.add(Boolean.class);
-            // Also add actual column classes from the table model
-            for (int col = 0; col < table.getColumnCount(); col++) {
-                try {
-                    classesWrapped.add(table.getColumnClass(col));
-                } catch (Exception ex) { /* ignore */ }
-            }
-            for (Class<?> cls : classesWrapped) {
-                try {
-                    TableCellRenderer defRenderer = table.getDefaultRenderer(cls);
-                    if (defRenderer != null && !(defRenderer instanceof ThaiCellRenderer)) {
-                        table.setDefaultRenderer(cls, new ThaiCellRenderer(defRenderer, normal));
-                    }
-                } catch (Exception ex) { /* ignore */ }
-            }
-
-            // Wrap per-column renderers
-            int tableCount = 0;
-            if (table.getColumnModel() != null) {
-                for (int col = 0; col < table.getColumnModel().getColumnCount(); col++) {
-                    TableColumn tc = table.getColumnModel().getColumn(col);
-                    TableCellRenderer colRenderer = tc.getCellRenderer();
-                    if (colRenderer != null && !(colRenderer instanceof ThaiCellRenderer)) {
-                        tc.setCellRenderer(new ThaiCellRenderer(colRenderer, normal));
-                        tableCount++;
-                    }
-                    // If no per-column renderer, force one from the effective renderer
-                    if (colRenderer == null) {
+                } else {
+                    try {
+                        c.getDeclaredField(member);
+                        found = true;
+                    } catch (NoSuchFieldException e) {
                         try {
-                            Class<?> colClass = table.getColumnClass(col);
-                            TableCellRenderer effective = table.getDefaultRenderer(colClass);
-                            if (effective != null && !(effective instanceof ThaiCellRenderer)) {
-                                tc.setCellRenderer(new ThaiCellRenderer(effective, normal));
-                                tableCount++;
-                            }
-                        } catch (Exception ex) { /* ignore */ }
+                            c.getField(member);
+                            found = true;
+                        } catch (NoSuchFieldException e2) { /* missing */ }
                     }
                 }
+                if (!found) missing.add(shortName + "." + member);
             }
-            // Only log when something was actually (re)wrapped — this runs on every
-            // maintenance timer tick and is normally a no-op after the first pass.
-            if (tableCount > 0 || headerWrapped) {
-                System.out.println("[Launcher] Wrapped " + tableCount + " column renderers on "
-                    + table.getClass().getSimpleName() + " (" + table.getColumnCount() + " cols)");
-            }
-        } catch (Exception e) {
-            System.err.println("[Launcher] wrapTableRenderers error: " + e.getMessage());
         }
+        return missing;
     }
-
-    // ==================== Helpers ====================
 
     private static Properties loadOrCreateProperties() {
         Properties props = new Properties();
@@ -1042,7 +928,7 @@ public class MacMahonLauncher {
             }
         } else {
             // Create default
-            props.setProperty("tesuji.url", "https://tesuji-reg.vercel.app");
+            props.setProperty("tesuji.url", DEFAULT_TESUJI_URL);
             props.setProperty("tesuji.token", "your_secret_token_here");
             try (FileOutputStream fos = new FileOutputStream(propFile)) {
                 props.store(new OutputStreamWriter(fos, "UTF-8"),
@@ -1126,250 +1012,7 @@ public class MacMahonLauncher {
         }
     }
 
-    /**
-     * Background timer that periodically re-applies Thai font to all visible JFrames.
-     * This catches tables/components that MacMahon creates AFTER our initial font pass
-     * (e.g., when a tournament is opened or rounds are created).
-     */
-    private static void startFontMaintenanceTimer() {
-        Timer fontTimer = new Timer(5000, new java.awt.event.ActionListener() {
-            public void actionPerformed(java.awt.event.ActionEvent e) {
-                Frame[] frames = Frame.getFrames();
-                for (Frame frame : frames) {
-                    if (frame instanceof JFrame && frame.isVisible()) {
-                        applyThaiFontToAll((Container) frame);
-                    }
-                }
-            }
-        });
-        fontTimer.setRepeats(true);
-        fontTimer.start();
-        System.out.println("[Launcher] Font maintenance timer started (every 5s)");
-    }
-
-    /**
-     * Wrapper renderer that forces Thai-compatible font on any JTable cell renderer.
-     * This ensures MacMahon's custom renderers (WalllistCellRenderer, PairingsCellRenderer)
-     * use Thai-compatible font instead of the default Dialog font.
-     */
-    private static class ThaiCellRenderer implements TableCellRenderer {
-        private final TableCellRenderer delegate;
-        private final Font font;
-
-        ThaiCellRenderer(TableCellRenderer delegate, Font font) {
-            this.delegate = delegate;
-            this.font = font;
-        }
-
-        public Component getTableCellRendererComponent(JTable table, Object value,
-                boolean isSelected, boolean hasFocus, int row, int column) {
-            Component c = delegate.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
-            // Recursively set Thai font on ALL sub-components
-            // (handles compound renderers that use JPanel with JLabels inside)
-            setFontDeep(c, font);
-            return c;
-        }
-
-        private void setFontDeep(Component comp, Font f) {
-            // Preserve bold/italic style from original font.
-            // Skip setFont() when the family already matches — this runs on
-            // every cell repaint, so a redundant setFont() here means every
-            // visible cell repaints itself on every paint pass.
-            // Compare via getName() (always the exact string passed to the Font
-            // constructor), not getFamily() (which the OS may resolve to
-            // "Dialog" if the family isn't installed, masking real changes).
-            Font current = comp.getFont();
-            if (current == null) {
-                comp.setFont(f);
-            } else if (!f.getName().equals(current.getName())) {
-                comp.setFont(new Font(f.getName(), current.getStyle(), current.getSize()));
-            }
-            if (comp instanceof Container) {
-                for (Component child : ((Container) comp).getComponents()) {
-                    setFontDeep(child, f);
-                }
-            }
-        }
-    }
-
-    // ==================== Java 25 Auto-Detection ====================
-
-    /**
-     * If not running on Java 25+, search for it and relaunch.
-     * This allows double-clicking the JAR with any Java version.
-     */
-    private static void ensureJava25() {
-        String version = System.getProperty("java.version");
-        int major = getMajorVersion(version);
-        System.out.println("[Launcher] Java version: " + version + " (major=" + major + ")");
-
-        if (major >= 25) return; // OK
-
-        System.out.println("[Launcher] Need Java 25+, searching...");
-        String java25 = findJava25Path();
-        if (java25 != null) {
-            System.out.println("[Launcher] Found Java 25+: " + java25);
-            if (relaunchWithJava(java25)) {
-                System.exit(0);
-            } else {
-                showError("เปิดโปรแกรมใหม่ด้วย Java 25 ไม่สำเร็จ\n"
-                    + "Java path: " + java25 + "\n\n"
-                    + "ลองรัน macmahon-tesuji.jar ด้วยตนเองผ่าน command line:\n"
-                    + "\"" + java25 + "\" -jar macmahon-tesuji.jar");
-                System.exit(1);
-            }
-        } else {
-            JOptionPane.showMessageDialog(null,
-                "MacMahon requires Java 25+\n\n" +
-                "Current: Java " + version + "\n\n" +
-                javaInstallHint(),
-                "MacMahon Launcher", JOptionPane.ERROR_MESSAGE);
-            System.exit(1);
-        }
-    }
-
-    private static boolean isMac() {
-        return System.getProperty("os.name", "").toLowerCase().contains("mac");
-    }
-
-    private static boolean isWindows() {
-        return System.getProperty("os.name", "").toLowerCase().contains("win");
-    }
-
-    private static String javaInstallHint() {
-        if (isMac()) {
-            return "ติดตั้ง Java 25 (Temurin) ผ่าน Homebrew:\n"
-                + "  brew install --cask temurin\n\n"
-                + "หรือดาวน์โหลด .pkg จาก:\n"
-                + "https://adoptium.net/temurin/releases/?version=25";
-        }
-        return "Download Amazon Corretto 25:\n"
-            + "https://corretto.aws/downloads/latest/amazon-corretto-25-x64-windows-jdk.msi";
-    }
-
-    private static int getMajorVersion(String version) {
-        if (version.startsWith("1.")) version = version.substring(2);
-        int dot = version.indexOf('.');
-        if (dot > 0) version = version.substring(0, dot);
-        try { return Integer.parseInt(version); }
-        catch (NumberFormatException e) { return 0; }
-    }
-
-    private static String findJava25Path() {
-        if (isMac()) return findJava25Mac();
-        if (isWindows()) return findJava25Windows();
-        return findJava25Generic();
-    }
-
-    /**
-     * Locate Java 25+ on macOS. Prefers Apple's own JVM registry (java_home),
-     * which correctly finds any properly-installed JDK/JRE regardless of
-     * vendor (Temurin, Corretto, Zulu, ...) or install method (pkg, brew
-     * cask). Falls back to scanning the standard JVM bundle directory.
-     */
-    private static String findJava25Mac() {
-        try {
-            Process p = new ProcessBuilder("/usr/libexec/java_home", "-v", "25+").start();
-            String home = readProcessOutput(p).trim();
-            int exit = p.waitFor();
-            if (exit == 0 && !home.isEmpty()) {
-                File javaBin = new File(home, "bin/java");
-                if (javaBin.exists()) return javaBin.getAbsolutePath();
-            }
-        } catch (Exception e) {
-            System.err.println("[Launcher] java_home lookup failed: " + e.getMessage());
-        }
-
-        File jvmDir = new File("/Library/Java/JavaVirtualMachines");
-        File[] bundles = jvmDir.listFiles();
-        if (bundles != null) {
-            for (File bundle : bundles) {
-                if (bundle.getName().matches("(?i).*(?:jdk-?25|corretto-?25|temurin-?25|zulu.*25).*")) {
-                    File javaBin = new File(bundle, "Contents/Home/bin/java");
-                    if (javaBin.exists()) return javaBin.getAbsolutePath();
-                }
-            }
-        }
-        return null;
-    }
-
-    private static String findJava25Windows() {
-        String[] basePaths = {
-            "C:\\Program Files\\Amazon Corretto",
-            "C:\\Program Files\\Java",
-            "C:\\Program Files\\Eclipse Adoptium",
-            "C:\\Program Files\\BellSoft",
-            "C:\\Program Files\\Microsoft"
-        };
-        for (String base : basePaths) {
-            File dir = new File(base);
-            if (!dir.exists()) continue;
-            File[] children = dir.listFiles();
-            if (children == null) continue;
-            for (File d : children) {
-                if (!d.isDirectory()) continue;
-                // Match jdk25, jdk-25, jdk25.0.3_9, etc.
-                if (d.getName().matches("(?i).*(?:jdk-?25|corretto-?25).*")) {
-                    File javaw = new File(d, "bin" + File.separator + "javaw.exe");
-                    if (javaw.exists()) return javaw.getAbsolutePath();
-                    File java = new File(d, "bin" + File.separator + "java.exe");
-                    if (java.exists()) return java.getAbsolutePath();
-                }
-            }
-        }
-        return null;
-    }
-
-    /** Best-effort lookup for other OSes (e.g. Linux) — JAVA_HOME, then /usr/lib/jvm. */
-    private static String findJava25Generic() {
-        String javaHomeEnv = System.getenv("JAVA_HOME");
-        if (javaHomeEnv != null) {
-            File javaBin = new File(javaHomeEnv, "bin/java");
-            if (javaBin.exists()) return javaBin.getAbsolutePath();
-        }
-        File jvmDir = new File("/usr/lib/jvm");
-        File[] children = jvmDir.listFiles();
-        if (children != null) {
-            for (File d : children) {
-                if (d.getName().matches(".*25.*")) {
-                    File javaBin = new File(d, "bin/java");
-                    if (javaBin.exists()) return javaBin.getAbsolutePath();
-                }
-            }
-        }
-        return null;
-    }
-
-    private static String readProcessOutput(Process p) throws IOException {
-        BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream(), "UTF-8"));
-        try {
-            StringBuilder sb = new StringBuilder();
-            String line;
-            while ((line = br.readLine()) != null) sb.append(line);
-            return sb.toString();
-        } finally {
-            br.close();
-        }
-    }
-
-    private static boolean relaunchWithJava(String javaPath) {
-        try {
-            String jarPath = new File(MacMahonLauncher.class.getProtectionDomain()
-                .getCodeSource().getLocation().toURI()).getAbsolutePath();
-            ProcessBuilder pb = new ProcessBuilder(
-                javaPath, "-Dfile.encoding=UTF-8", "-jar", jarPath
-            );
-            pb.directory(new File(jarPath).getParentFile());
-            pb.start();
-            return true;
-        } catch (Exception e) {
-            System.err.println("[Launcher] Relaunch failed: " + e.getMessage());
-            e.printStackTrace();
-            return false;
-        }
-    }
-
-    private static void showError(String message) {
+    static void showError(String message) {
         JOptionPane.showMessageDialog(null, message,
             "MacMahon Launcher — Error", JOptionPane.ERROR_MESSAGE);
     }

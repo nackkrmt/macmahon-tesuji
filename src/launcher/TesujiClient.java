@@ -47,7 +47,7 @@ public class TesujiClient {
      * Returns match data for a specific division and round.
      */
     public MatchData getMatches(String divisionId, String round) throws IOException {
-        String json = httpGet("/api/divisions/" + divisionId + "/matches?round=" + round);
+        String json = httpGet("/api/divisions/" + enc(divisionId) + "/matches?round=" + enc(round));
 
         MatchData data = new MatchData();
         data.divisionId = divisionId;
@@ -163,10 +163,25 @@ public class TesujiClient {
     /**
      * Ensure division exists on TESUJI. Creates if not found.
      */
+    /**
+     * Same division? "01" and "1" refer to the same division — servers and
+     * file names disagree on zero-padding, so compare with leading zeros
+     * stripped. Used by export (ensureDivision) and sync auto-select alike.
+     */
+    public static boolean sameDivisionId(String a, String b) {
+        if (a == null || b == null) return false;
+        String ta = a.trim();
+        String tb = b.trim();
+        if (ta.equals(tb)) return true;
+        String na = ta.replaceFirst("^0+", "");
+        String nb = tb.replaceFirst("^0+", "");
+        return !na.isEmpty() && na.equals(nb);
+    }
+
     public void ensureDivision(String id, String name) throws IOException {
         List<Division> existing = getDivisions();
         for (Division d : existing) {
-            if (d.id.equals(id)) {
+            if (sameDivisionId(d.id, id)) {
                 System.out.println("[TesujiClient] Division " + id + " already exists");
                 return;
             }
@@ -181,7 +196,7 @@ public class TesujiClient {
      * Clear existing round before re-uploading.
      */
     public void deleteRound(String divisionId, String round) throws IOException {
-        httpDelete("/api/divisions/" + divisionId + "/rounds/" + round);
+        httpDelete("/api/divisions/" + enc(divisionId) + "/rounds/" + enc(round));
     }
 
     /**
@@ -201,7 +216,7 @@ public class TesujiClient {
             json.append(",\"whiteScore\":").append(m.whiteScore == null ? "null" : "\"" + escJson(m.whiteScore) + "\"").append("}");
         }
         json.append("]}");
-        httpPost("/api/divisions/" + divisionId + "/matches", json.toString());
+        httpPost("/api/divisions/" + enc(divisionId) + "/matches", json.toString());
     }
 
     /**
@@ -227,10 +242,20 @@ public class TesujiClient {
             json.append("]");
         }
         json.append("]}}");
-        httpPost("/api/divisions/" + divisionId + "/standings", json.toString());
+        httpPost("/api/divisions/" + enc(divisionId) + "/standings", json.toString());
     }
 
-    private static String escJson(String s) {
+    /** Percent-encode one URL path/query component (UTF-8; space as %20, not +). */
+    private static String enc(String s) {
+        if (s == null) return "";
+        try {
+            return URLEncoder.encode(s, "UTF-8").replace("+", "%20");
+        } catch (UnsupportedEncodingException e) {
+            return s; // unreachable: UTF-8 is always supported
+        }
+    }
+
+    static String escJson(String s) {
         if (s == null) return "";
         StringBuilder sb = new StringBuilder(s.length() + 16);
         for (int i = 0; i < s.length(); i++) {
@@ -277,6 +302,9 @@ public class TesujiClient {
                 if (json.charAt(end) == '"') break;
                 end++;
             }
+            // A trailing backslash in malformed JSON can push end one past
+            // the last char — clamp instead of StringIndexOutOfBounds.
+            if (end > json.length()) end = json.length();
             return unescapeJson(json.substring(start, end));
         } else if (json.charAt(idx) == 'n') {
             return null; // null
@@ -344,7 +372,7 @@ public class TesujiClient {
         return result;
     }
 
-    private static String unescapeJson(String s) {
+    static String unescapeJson(String s) {
         if (s.indexOf('\\') < 0) return s;
         StringBuilder sb = new StringBuilder(s.length());
         for (int i = 0; i < s.length(); i++) {

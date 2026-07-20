@@ -28,7 +28,11 @@
     6) Thai Font Support - บังคับ font ภาษาไทยให้แสดงผลถูกต้อง
        ใน JTable, JMenu, JLabel ทุกจุด
     7) Java 25 Auto-Detection - เมื่อ double-click .jar ถ้า Java เก่า
-       จะค้นหา Java 25 ในเครื่องและ relaunch อัตโนมัติ
+       จะค้นหา Java 25 หรือใหม่กว่าในเครื่องและ relaunch อัตโนมัติ
+    8) Launcher Log - บันทึกการทำงานทั้งหมดลงไฟล์ launcher.log ข้าง jar
+       (เปิดดูได้เมื่อมีปัญหา — เขียนทับใหม่ทุกครั้งที่เปิดโปรแกรม)
+    9) Compatibility Check - ตรวจตอนเปิดว่า MacMahon JAR เป็นเวอร์ชันที่
+       launcher รองรับ ถ้าไม่ตรงจะเตือนชัดเจนและปิดเมนู TESUJI ให้ปลอดภัย
 
 ============================================================
   2. ไฟล์ในชุดโปรแกรม
@@ -36,6 +40,7 @@
 
   macmahon-tesuji.jar   ตัวโปรแกรม (รวม MacMahon 3.10 ไว้ข้างใน)
   launcher.properties   ไฟล์ตั้งค่า (URL + token ของ TESUJI server)
+  launcher.log          บันทึกการทำงานรอบล่าสุด (สร้างอัตโนมัติตอนเปิด)
   README.txt            ไฟล์นี้
   MacMahon.bat          ตัวเปิดโปรแกรมสำรองสำหรับ Windows (ปกติไม่ต้องใช้)
   MacMahon.command       ตัวเปิดโปรแกรมสำรองสำหรับ macOS (ปกติไม่ต้องใช้)
@@ -56,12 +61,15 @@
 ============================================================
 
   src/launcher/
-    MacMahonLauncher.java   Main entry point, tab bar, font, menu,
-                            export to TESUJI, Java 25 auto-detection
+    MacMahonLauncher.java   Main entry point, tab bar, menu, export,
+                            compatibility check, file logging
     SyncDialog.java         Sync dialog UI + verify/auto-fill/force pairing
     TesujiClient.java       HTTP client for TESUJI REST API
+    ThaiFontManager.java    ระบบ font ไทยทั้งหมด (UIManager/listener/timer)
+    JavaFinder.java         ค้นหา Java 25+ ในเครื่อง + relaunch
+    SelfTest.java           เทสต์ pure logic (รันตอน build, ไม่ติดไปใน jar)
 
-  3 classes ทั้งหมดอยู่ใน package "launcher"
+  ทุก class อยู่ใน package "launcher"
   ไม่มี external dependency - ใช้แค่ Java standard library
   (java.net.HttpURLConnection, javax.swing.*, java.lang.reflect.*)
 
@@ -83,15 +91,18 @@
 
   Flow:
     MacMahonLauncher.main()
-      -> ensureJava25()                // ตรวจ/หา Java 25
+      -> setupFileLogging()            // tee stdout/err -> launcher.log
+      -> JavaFinder.ensureJava25()     // ตรวจ/หา Java 25+
       -> loadOrCreateProperties()      // อ่าน launcher.properties
       -> scanTournamentFiles()         // หา .xml ใน folder
       -> findMacMahonJar()             // หา JAR (external > embedded)
       -> new URLClassLoader(jarUrl)    // load MacMahon classes
+      -> checkMacMahonCompat(cl)       // ตรวจ internals ที่ใช้ผ่าน reflection
+                                       //   ไม่ครบ: เตือน + ปิดฟีเจอร์ TESUJI
       -> MacMahonApplication.main()    // เปิด MacMahon ปกติ
       -> Timer(500ms) polling          // รอ JFrame แสดง
         -> findAppInstance(jf)         // หา MacMahonApplication instance
-        -> applyThaiFontToAll(jf)      // ใส่ font ไทย
+        -> ThaiFontManager.applyThaiFontToAll(jf)  // ใส่ font ไทย
         -> injectMenu(jf)             // เพิ่มเมนู TESUJI
         -> injectTabBar(jf, xmlFiles)  // เพิ่ม tab bar (ถ้ามี .xml)
 
@@ -340,7 +351,9 @@
        - fireWalllistTableDataChanged()
        - firePairingsTableDataChanged()
        - Tournament.buildParticipantScores()
-    6. Re-verify อัตโนมัติ
+    6. Auto-save: เรียก tournamentSave() ทันที — ผลที่เพิ่งเติมถูกเขียนลง
+       ไฟล์ .xml เลย (ถ้า save ไม่สำเร็จจะแจ้งให้กด Save เอง)
+    7. Re-verify อัตโนมัติ
 
   5.6 Name Matching (Fuzzy)
   --------------------------
@@ -398,7 +411,7 @@
   Popup แสดง:
     - จำนวน board ที่จะแก้เลขโต๊ะ
     - จำนวนชื่อที่จะแก้
-    - refreshMacMahonUI() + re-verify หลังเสร็จ
+    - refreshMacMahonUI() + auto-save + re-verify หลังเสร็จ
 
   *** ปุ่ม Force Pairing enabled เมื่อ: ***
     - Round ที่เลือก = 1 (isRound1)
@@ -451,11 +464,12 @@
   6.3 JSON Parser
   ----------------
   ไม่ใช้ library ภายนอก - parse JSON เองด้วย string manipulation:
-    extractJsonString(json, key)     -> String value
-    extractJsonValue(json, key)      -> Raw value (string/number/bool)
+    extractJsonString(json, key)     -> String value (หรือ raw number/bool)
     extractJsonArray(json, key)      -> Array content (string)
     splitJsonArray(content)          -> List<String> objects
     splitJsonArrayStrings(content)   -> List<String> string values
+
+  มี SelfTest ครอบ parser ทุกตัว (รันอัตโนมัติตอน build)
 
   รองรับ: string, number, boolean, null, nested objects, arrays
   ไม่รองรับ: complex nested structures ที่ลึกกว่า 1 ระดับ
@@ -463,6 +477,9 @@
   6.4 Export Flow
   ----------------
   Export Pairings:
+    0. ตรวจชื่อไฟล์ tab ปัจจุบัน: ต้องขึ้นต้นด้วยเลข Division ("01 - ...")
+       ถ้าไม่ใช่ -> ยกเลิก export พร้อมอธิบายวิธีตั้งชื่อ
+       (กันข้อมูลไปลบ/ทับ division อื่นบน server)
     1. อ่าน Tournament -> getCurrentRoundNumber()
     2. อ่าน Pairings ผ่าน reflection (skip bye pairings)
        พร้อมดึง McMahon score ของแต่ละฝ่าย (blackScore/whiteScore)
@@ -484,6 +501,9 @@
   Division ID/Name จากชื่อไฟล์:
     "01 - 1-2 Kyu.xml" -> id="01", name="1-2 Kyu"
     regex: ^(\d+)\s*-\s*(.+)$
+    ถ้าชื่อไฟล์ไม่มีเลขนำหน้า -> export ถูกยกเลิก (ไม่เดา division)
+    เทียบ id แบบตัด leading zero: "01" == "1" (TesujiClient.sameDivisionId
+    ใช้ร่วมกันทั้ง ensureDivision และ division auto-select)
 
 ============================================================
   7. BUILD PROCESS
@@ -501,9 +521,12 @@
 
   7.2 Build Steps (build.ps1 / build.sh)
   ----------------------------------------
-  [1/3] Compile: javac -encoding UTF-8 --release 8 -d build src/**/*.java
-  [2/3] Embed:   copy lib/macmahon-3.10.jar -> build/embedded/macmahon.jar
-  [3/3] Package: jar cfm macmahon-tesuji.jar MANIFEST.MF -C build .
+  [1/4] Compile:  javac -encoding UTF-8 --release 8 -d build src/**/*.java
+  [2/4] SelfTest: java -cp build launcher.SelfTest
+                  (เทสต์ล้ม = build หยุดทันที; class ของ SelfTest ถูกลบ
+                  ก่อน package จึงไม่ติดไปใน jar)
+  [3/4] Embed:    copy lib/macmahon-3.10.jar -> build/embedded/macmahon.jar
+  [4/4] Package:  jar cfm macmahon-tesuji.jar MANIFEST.MF -C build .
 
   รัน: .\build.ps1 (Windows) หรือ ./build.sh (macOS/Linux — ต้อง
   chmod +x build.sh ครั้งแรก) ขั้นตอนเหมือนกันทุกประการ ต่างแค่ภาษา
@@ -515,8 +538,8 @@
 
   *** --release 8 ***
   Compile ด้วย Java 8 class file format เพื่อให้ Java ทุก version
-  สามารถ launch .jar ได้ (แล้ว ensureJava25() จะ relaunch ด้วย
-  Java 25 เอง)
+  สามารถ launch .jar ได้ (แล้ว JavaFinder.ensureJava25() จะ relaunch
+  ด้วย Java 25+ เอง)
 
   Output: macmahon-tesuji.jar (~600KB, includes embedded MacMahon)
 
@@ -531,27 +554,32 @@
   8. JAVA 25 AUTO-DETECTION
 ============================================================
 
-  เมื่อ double-click macmahon-tesuji.jar:
+  เมื่อ double-click macmahon-tesuji.jar (โค้ดอยู่ใน JavaFinder.java):
 
   1. เช็ค java.version ปัจจุบัน
-  2. ถ้า >= 25 -> ทำงานปกติ
-  3. ถ้า < 25 -> ค้นหา Java 25 ในเครื่อง ตาม OS (findJava25Path()
+  2. ถ้า >= 25 -> ทำงานปกติ (เวอร์ชันใหม่กว่า เช่น 26, 27 ก็ใช้ได้)
+  3. ถ้า < 25 -> ค้นหา Java 25+ ในเครื่อง ตาม OS (findJava25Path()
      แยกเป็น findJava25Mac() / findJava25Windows() / findJava25Generic()):
 
-     Windows (findJava25Windows):
-       - C:\Program Files\Amazon Corretto\jdk25*
-       - C:\Program Files\Java\jdk-25*
-       - C:\Program Files\Eclipse Adoptium\jdk-25*
-       - C:\Program Files\BellSoft\*25*
-       - C:\Program Files\Microsoft\*25*
+     กติกาดูชื่อโฟลเดอร์ (dirLooksLikeJavaAtLeastMin):
+       เอา "เลขชุดแรก" ในชื่อโฟลเดอร์มาเทียบ ต้อง >= 25
+       "jdk25.0.3_9" -> 25 ผ่าน, "jdk-26" -> 26 ผ่าน,
+       "jdk1.8.0_292" -> 1 ไม่ผ่าน (และเช็คว่ามี bin/java จริงเสมอ)
+
+     Windows (findJava25Windows) สแกนใต้:
+       - C:\Program Files\Amazon Corretto
+       - C:\Program Files\Java
+       - C:\Program Files\Eclipse Adoptium
+       - C:\Program Files\BellSoft
+       - C:\Program Files\Microsoft
        ใช้ bin\javaw.exe (ไม่มี console) หรือ bin\java.exe
 
      macOS (findJava25Mac):
        - เรียก `/usr/libexec/java_home -v "25+"` ก่อน — เจอ JDK/JRE
          เวอร์ชัน 25 ขึ้นไปของ vendor ไหนก็ได้ (Temurin, Corretto, Zulu)
          ที่ติดตั้งถูกวิธี (.pkg หรือ brew cask)
-       - Fallback: scan /Library/Java/JavaVirtualMachines/* หา bundle
-         ที่ชื่อ match jdk-25/corretto-25/temurin-25/zulu...25
+       - Fallback: scan /Library/Java/JavaVirtualMachines/* ด้วยกติกา
+         เลขชุดแรก >= 25 แบบเดียวกัน
        - ใช้ Contents/Home/bin/java (ไม่มี javaw บน mac)
 
   4. ถ้าเจอ -> relaunch ด้วย ProcessBuilder (java/javaw path ที่เจอ +
@@ -561,7 +589,8 @@
 
   *** ไม่ต้องใช้ .bat / .command อีกต่อไป ***
   เพราะ .jar compile ด้วย --release 8 จึงรันได้กับ Java ทุก version
-  แล้วค่อย relaunch ด้วย Java 25 เอง (ทั้ง Windows และ macOS)
+  แล้วค่อย relaunch ด้วย Java 25+ เอง (ทั้ง Windows และ macOS)
+  (MacMahon.bat ตัวสำรองก็ปรับให้สแกนหา Java 25-39 แล้วเช่นกัน)
 
 ============================================================
   9. USER GUIDE - ขั้นตอนการใช้งาน
@@ -606,6 +635,9 @@
   วาง .xml files ใน folder "xml" (ข้าง ๆ macmahon-tesuji.jar)
   ระบบจะสร้าง tab bar ให้อัตโนมัติ
 
+  *** สำคัญ: ถ้าชื่อไฟล์ไม่ขึ้นต้นด้วยเลข Division ระบบจะไม่ยอม
+  Export (กันข้อมูลไปลบ/ทับ division อื่นบน server) ***
+
   9.4 Multi-Division Tab Bar
   ----------------------------
   - วาง .xml หลายไฟล์ใน folder -> จะมี tab bar ด้านบน
@@ -646,7 +678,7 @@
   5. ระบบจะ:
      - แก้เลขโต๊ะให้ตรงกับ TESUJI (ทุกคู่ที่จับคู่ได้)
      - แก้ชื่อให้ตรงกับ TESUJI (เฉพาะคู่ที่ชื่อไม่ตรง)
-  6. ตรวจผลลัพธ์ -> Save Tournament (File > Save)
+  6. ระบบ save ไฟล์ให้อัตโนมัติ (ถ้าไม่สำเร็จจะแจ้งให้กด File > Save เอง)
 
   9.8 Sync ผลการแข่งขัน (ทุก Round)
   ------------------------------------
@@ -654,7 +686,7 @@
   2. Division + Round จะ auto-select
   3. กด Verify -> ดูตารางเปรียบเทียบ
   4. กด Auto-fill -> ยืนยัน
-  5. Save Tournament
+  5. ระบบ save ไฟล์ให้อัตโนมัติ (ถ้าไม่สำเร็จจะแจ้งให้กด File > Save เอง)
 
   สี Status:
     เขียว  "Match"          ผลตรงกันแล้ว
@@ -666,6 +698,19 @@
 ============================================================
   10. TROUBLESHOOTING
 ============================================================
+
+  *** เริ่มจากเปิดไฟล์ launcher.log (ข้าง ๆ jar) ทุกครั้ง ***
+  ทุกขั้นตอนการทำงานและข้อผิดพลาดถูกบันทึกไว้ในนั้น (เขียนทับใหม่
+  ทุกครั้งที่เปิดโปรแกรม — copy เก็บก่อนเปิดรอบใหม่ถ้าจะส่งให้คนช่วยดู)
+
+  "MacMahon JAR ที่พบไม่ตรงกับเวอร์ชันที่ Launcher รองรับ"
+  -> MacMahon ที่โหลดได้ไม่ใช่ 3.10 ที่ launcher รู้จัก เมนู TESUJI
+     ถูกปิดเพื่อความปลอดภัย แต่ MacMahon ยังใช้งานได้ปกติ
+  -> ใช้ macmahon-3.10.jar เดิม หรืออัปเดต launcher ให้รองรับเวอร์ชันใหม่
+
+  "ระบุ Division จากชื่อไฟล์ไม่ได้ — ยกเลิกการ Export"
+  -> เปลี่ยนชื่อไฟล์ .xml ให้ขึ้นต้นด้วยเลข division เช่น "01 - 1-2 Kyu.xml"
+     แล้วเปิดโปรแกรมใหม่
 
   "Java 25 not found"
   -> ติดตั้ง Amazon Corretto 25:
@@ -709,6 +754,7 @@
 
   - Force Pairing ใช้ได้ Round 1 เท่านั้น
   - JSON parser เป็น basic - รองรับ TESUJI API format เท่านั้น
+    (มี SelfTest ครอบพฤติกรรมหลักไว้แล้ว รันอัตโนมัติทุกครั้งที่ build)
   - Font maintenance timer ทำงานทุก 5 วินาที แต่จะ skip component ที่ font
     ถูกต้องอยู่แล้ว (ไม่ churn ทั้ง tree ทุกครั้ง overhead จึงต่ำมาก)
   - ต้องใช้ Java 25+ (MacMahon 3.10 requirement)

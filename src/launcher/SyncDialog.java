@@ -95,7 +95,7 @@ public class SyncDialog extends JDialog {
 
         // Ensure Thai font for this dialog — reuse the font the launcher already
         // resolved for the running system (may not be "TH Sarabun New" if unavailable)
-        Font thaiFont = new Font(MacMahonLauncher.getChosenFontName(), Font.PLAIN, 12);
+        Font thaiFont = new Font(ThaiFontManager.getChosenFontName(), Font.PLAIN, 12);
 
         // Top panel — Division + Round selection
         JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
@@ -516,7 +516,7 @@ public class SyncDialog extends JDialog {
      * Check if two player names match (fuzzy).
      * Handles different formats: "First Last" vs "Last, First", whitespace, case.
      */
-    private boolean namesMatch(String tesujiName, String macName) {
+    static boolean namesMatch(String tesujiName, String macName) {
         if (tesujiName == null || macName == null) return true;
         String a = normalizeName(tesujiName);
         String b = normalizeName(macName);
@@ -611,8 +611,14 @@ public class SyncDialog extends JDialog {
         // Refresh MacMahon UI
         refreshMacMahonUI();
 
+        // Freshly filled results only live in memory — write them to the
+        // .xml right away (same call the launcher makes on tab switch), so
+        // a crash/power cut can no longer lose them.
+        boolean saved = saveTournament();
+
         JOptionPane.showMessageDialog(this,
-            String.format("เติมผลสำเร็จ %d คู่" + (failed > 0 ? " (ล้มเหลว %d คู่)" : ""), filled, failed),
+            String.format("เติมผลสำเร็จ %d คู่" + (failed > 0 ? " (ล้มเหลว %d คู่)" : ""), filled, failed)
+                + (saved ? "\nบันทึกไฟล์เรียบร้อย" : "\n⚠ บันทึกไฟล์ไม่สำเร็จ — กรุณากด Save ใน MacMahon เอง"),
             "Auto-fill Complete", JOptionPane.INFORMATION_MESSAGE);
 
         // Re-verify
@@ -749,11 +755,13 @@ public class SyncDialog extends JDialog {
         }
 
         refreshMacMahonUI();
+        boolean saved = saveTournament();
 
         StringBuilder resultMsg = new StringBuilder("Force Pairing สำเร็จ!\n");
         if (boardFixed > 0) resultMsg.append(String.format("แก้เลขโต๊ะ %d คู่\n", boardFixed));
         if (nameFixed > 0) resultMsg.append(String.format("แก้ชื่อ %d คน\n", nameFixed));
         if (failed > 0) resultMsg.append(String.format("ล้มเหลว %d คน\n", failed));
+        resultMsg.append(saved ? "บันทึกไฟล์เรียบร้อย\n" : "⚠ บันทึกไฟล์ไม่สำเร็จ — กรุณากด Save ใน MacMahon เอง\n");
         JOptionPane.showMessageDialog(this, resultMsg.toString(),
             "Force Pairing Complete", JOptionPane.INFORMATION_MESSAGE);
 
@@ -811,14 +819,9 @@ public class SyncDialog extends JDialog {
         System.out.println("[Sync] Tournament name: " + name + " -> leading number: " + leadingNum);
 
         if (leadingNum != null) {
-            String numNorm = leadingNum.replaceFirst("^0+", "");
             for (TesujiClient.Division d : divs) {
-                String divId = d.id.trim();
-                // Exact match: "01" == "01"
-                if (divId.equals(leadingNum)) return d;
-                // Normalized match: "1" == "1" (handles "01" vs "1")
-                String divNorm = divId.replaceFirst("^0+", "");
-                if (!numNorm.isEmpty() && numNorm.equals(divNorm)) return d;
+                // "01" and "1" are the same division — shared normalize rule
+                if (TesujiClient.sameDivisionId(d.id, leadingNum)) return d;
             }
         }
 
@@ -928,7 +931,7 @@ public class SyncDialog extends JDialog {
         }
     }
 
-    private String normalizeResult(String result) {
+    static String normalizeResult(String result) {
         if (result == null) return "";
         String r = result.trim();
         // Handle TESUJI format
@@ -939,6 +942,24 @@ public class SyncDialog extends JDialog {
         if (r.equals("0-0")) return "0-0";
         if (r.equals("1-1")) return "1-1";
         return r;
+    }
+
+    /**
+     * Save the current tournament to its file — the same call the launcher
+     * makes when switching tabs. Returns true when MacMahon reported success
+     * (tournamentSave() == 0); false likely means a cancelled Save As dialog
+     * or an I/O problem, so callers should tell the user to save manually.
+     */
+    private boolean saveTournament() {
+        try {
+            Method save = appInstance.getClass().getMethod("tournamentSave");
+            int rc = (Integer) save.invoke(appInstance);
+            System.out.println("[Sync] Saved tournament (result=" + rc + ")");
+            return rc == 0;
+        } catch (Exception e) {
+            System.err.println("[Sync] Save failed: " + e.getMessage());
+            return false;
+        }
     }
 
     private void refreshMacMahonUI() {

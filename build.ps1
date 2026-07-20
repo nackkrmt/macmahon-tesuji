@@ -11,7 +11,7 @@ function Find-Jdk {
         $javacPath = Join-Path $env:JAVA_HOME "bin\javac.exe"
         $jarPath = Join-Path $env:JAVA_HOME "bin\jar.exe"
         if ((Test-Path $javacPath) -and (Test-Path $jarPath)) {
-            return @{ Javac = $javacPath; Jar = $jarPath }
+            return @{ Javac = $javacPath; Jar = $jarPath; Java = (Join-Path $env:JAVA_HOME "bin\java.exe") }
         }
     }
 
@@ -34,7 +34,7 @@ function Find-Jdk {
         $javacPath = Join-Path $dir.FullName "bin\javac.exe"
         $jarPath = Join-Path $dir.FullName "bin\jar.exe"
         if ((Test-Path $javacPath) -and (Test-Path $jarPath)) {
-            return @{ Javac = $javacPath; Jar = $jarPath }
+            return @{ Javac = $javacPath; Jar = $jarPath; Java = (Join-Path $dir.FullName "bin\java.exe") }
         }
     }
     return $null
@@ -48,6 +48,7 @@ if (-not $jdk) {
 }
 $javac = $jdk.Javac
 $jar = $jdk.Jar
+$java = $jdk.Java
 Write-Host "      Using JDK: $javac" -ForegroundColor Green
 
 # Clean
@@ -55,14 +56,21 @@ if (Test-Path "$root\build") { Remove-Item "$root\build" -Recurse -Force }
 New-Item -ItemType Directory -Path "$root\build" -Force | Out-Null
 
 # Step 1: Compile
-Write-Host "[1/3] Compiling..." -ForegroundColor Yellow
+Write-Host "[1/4] Compiling..." -ForegroundColor Yellow
 $sources = Get-ChildItem "$root\src" -Recurse -Filter "*.java" | Select-Object -ExpandProperty FullName
 & $javac -encoding UTF-8 --release 8 -d "$root\build" @sources
 if ($LASTEXITCODE -ne 0) { Write-Host "COMPILE FAILED" -ForegroundColor Red; exit 1 }
 Write-Host "      OK" -ForegroundColor Green
 
-# Step 2: Embed MacMahon JAR
-Write-Host "[2/3] Embedding MacMahon JAR..." -ForegroundColor Yellow
+# Step 2: Self tests — pure-logic checks; abort the build on failure
+Write-Host "[2/4] Running SelfTest..." -ForegroundColor Yellow
+& $java "-Djava.awt.headless=true" -cp "$root\build" launcher.SelfTest
+if ($LASTEXITCODE -ne 0) { Write-Host "SELFTEST FAILED" -ForegroundColor Red; exit 1 }
+# Test classes are build-time only — keep them out of the shipped jar
+Remove-Item "$root\build\launcher\SelfTest*.class" -Force -ErrorAction SilentlyContinue
+
+# Step 3: Embed MacMahon JAR
+Write-Host "[3/4] Embedding MacMahon JAR..." -ForegroundColor Yellow
 $macmahonJar = Get-ChildItem "$root\lib" -Filter "macmahon-*.jar" -ErrorAction SilentlyContinue |
     Select-Object -First 1
 
@@ -77,8 +85,8 @@ if ($macmahonJar) {
     Write-Host "      WARNING: No macmahon JAR found in lib/" -ForegroundColor Red
 }
 
-# Step 3: Package JAR (generate manifest inline)
-Write-Host "[3/3] Packaging JAR..." -ForegroundColor Yellow
+# Step 4: Package JAR (generate manifest inline)
+Write-Host "[4/4] Packaging JAR..." -ForegroundColor Yellow
 $manifest = "$root\build\MANIFEST.MF"
 Set-Content -Path $manifest -Value "Manifest-Version: 1.0`nMain-Class: launcher.MacMahonLauncher`n" -Encoding ASCII
 & $jar cfm "$root\macmahon-tesuji.jar" $manifest -C "$root\build" .

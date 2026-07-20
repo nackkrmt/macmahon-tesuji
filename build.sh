@@ -48,7 +48,7 @@ rm -rf "$ROOT/build"
 mkdir -p "$ROOT/build"
 
 # Step 1: Compile
-echo "[1/3] Compiling..."
+echo "[1/4] Compiling..."
 # Collect sources into an array without mapfile/readarray — macOS ships bash
 # 3.2 by default (no bash 4+ builtins), so use a NUL-delimited read loop.
 SOURCES=()
@@ -58,8 +58,15 @@ done < <(find "$ROOT/src" -name "*.java" -print0)
 "$JAVAC" -encoding UTF-8 --release 8 -d "$ROOT/build" "${SOURCES[@]}"
 echo "      OK"
 
-# Step 2: Embed MacMahon JAR
-echo "[2/3] Embedding MacMahon JAR..."
+# Step 2: Self tests — pure-logic checks (JSON parser, name matching, ...);
+# set -e aborts the build when any test fails.
+echo "[2/4] Running SelfTest..."
+"$JDK_HOME/bin/java" -Djava.awt.headless=true -cp "$ROOT/build" launcher.SelfTest
+# Test classes are build-time only — keep them out of the shipped jar
+rm -f "$ROOT/build/launcher/SelfTest.class" "$ROOT/build/launcher/SelfTest$"*.class
+
+# Step 3: Embed MacMahon JAR
+echo "[3/4] Embedding MacMahon JAR..."
 MACMAHON_JAR="$(find "$ROOT/lib" -maxdepth 1 -name "macmahon-*.jar" | head -1)"
 if [ -n "$MACMAHON_JAR" ]; then
     mkdir -p "$ROOT/build/embedded"
@@ -69,8 +76,8 @@ else
     echo "      WARNING: No macmahon JAR found in lib/"
 fi
 
-# Step 3: Package JAR (generate manifest inline)
-echo "[3/3] Packaging JAR..."
+# Step 4: Package JAR (generate manifest inline)
+echo "[4/4] Packaging JAR..."
 MANIFEST="$ROOT/build/MANIFEST.MF"
 printf 'Manifest-Version: 1.0\nMain-Class: launcher.MacMahonLauncher\n' > "$MANIFEST"
 (cd "$ROOT/build" && "$JAR" cfm "$ROOT/macmahon-tesuji.jar" "$MANIFEST" .)
